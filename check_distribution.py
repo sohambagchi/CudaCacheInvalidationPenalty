@@ -19,16 +19,18 @@ def main(filename):
         err_count = 0
         
         for i, line in enumerate(numbers):
-            if '[CPU ITER' in line:
+            # if '[CPU ITER' in line:
+            if '[CPU-R]' in line or '[GPU-R]' in line:
                 try:
-                    y1.append(int(line.split(' ')[2].strip()))
-                    x.append(int(line.split(' ')[1].replace('ITER-', '').replace(']', '').strip()))
-                    y2.append(int(line.split(' ')[3].strip()))
+                    y1.append(int(line.split(' ')[6].strip()))
+                    x.append(int(line.split(' ')[2].strip()))
+                    y2.append(int(line.split(' ')[4].strip()))
                 except ValueError:
                     print(line)
                     err_count += 1
-            if '[GPU] -------------------------------' in line:
-                if 'Triggering' in line:
+            # if '[GPU] -------------------------------' in line:
+            if '[GPU-W]' in line or '[CPU-W]' in line:
+                if 'Start' in line:
                     kernel_starts.append(len(y1))
                 else:
                     kernel_stops.append(len(x))
@@ -84,7 +86,7 @@ def main(filename):
 if __name__ == '__main__':
     # iterate through all the .txt files in the folder, ignore subfolders
     for file in os.listdir('.'):
-        if file.endswith('.txt') and os.path.isfile(file):
+        if (file.endswith('.txt') and not file.startswith('result')) and os.path.isfile(file):
             print('Processing ' + file)
             main(file)
             print('Finished ' + file)
