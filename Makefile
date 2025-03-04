@@ -1,7 +1,7 @@
 OUTPUT = cache_invalidation_testing
 SRC = cache_invalidation_testing.cu 
 NVCC = nvcc
-NVCC_FLAGS = -g -O0 -Xcompiler -O0 -Xcicc -O0 -Xptxas -O1 -arch=sm_80
+NVCC_FLAGS = -g -O0 -Xcompiler -O0 -Xcicc -O0 -Xptxas -O1 -arch=sm_87
 LIBS = -lnuma -lm
 
 SCOPES = cuda\:\:thread_scope_system cuda\:\:thread_scope_thread cuda\:\:thread_scope_device # cuda\:\:thread_scope_block

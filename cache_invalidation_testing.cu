@@ -160,7 +160,7 @@ int main(int argc, char* argv[]) {
 
     clock_t gpu_reader_cycles;
     uint64_t cpu_reader_ns;
-
+    uint64_t writer_invocation_delay;
 
     if (reader == CE_GPU) {
 
@@ -207,13 +207,32 @@ int main(int argc, char* argv[]) {
     }
 
     // we want the writer to wait for 10 reader iterations
-    if (writer == CE_GPU) {
+    
+    if (reader == CE_CPU && writer == CE_CPU) {
+        gpu_reader_cycles *= 1000;
+        cpu_reader_ns *= 1000;
+        writer_invocation_delay = 250;
+    } else if (reader == CE_GPU && writer == CE_GPU) {
+        gpu_reader_cycles *= 2500;
+        cpu_reader_ns *= 2500;
+        writer_invocation_delay = 1000;
+    } else if (reader == CE_CPU && writer == CE_GPU) {
         gpu_reader_cycles *= 100;
         cpu_reader_ns *= 100;
-    } else {
-        gpu_reader_cycles *= 10;
-        cpu_reader_ns *= 10;
+        writer_invocation_delay = 1000;
+    } else if (reader == CE_GPU && writer == CE_CPU) {
+        gpu_reader_cycles *= 1000;
+        cpu_reader_ns *= 1000;
+        writer_invocation_delay = 1000;
     }
+
+    // if (writer == CE_GPU) {
+    //     gpu_reader_cycles *= 100;
+    //     cpu_reader_ns *= 100;
+    // } else {
+    //     gpu_reader_cycles *= 100;
+    //     cpu_reader_ns *= 100;
+    // }
     // gpu_reader_cycles *= 10;
     // cpu_reader_ns *= 10;
     
@@ -236,51 +255,61 @@ int main(int argc, char* argv[]) {
     void * durations;
 
     DATA_SIZE * result;
-
-    std::cout << "[INFO] Spawning Reader" << std::endl;
-
-    if (reader == CE_GPU) {
-        cudaMalloc(&result, NUM_ITERATIONS * sizeof(DATA_SIZE));
-        
-        cudaMalloc(&durations, NUM_ITERATIONS * sizeof(clock_t));
-
-        gpu_buffer_reader<<<1,1,0,stream_r>>>(buffer, result, (clock_t *) durations);
-    } else if (reader == CE_CPU) {
-        result = (DATA_SIZE *) malloc(NUM_ITERATIONS * sizeof(DATA_SIZE));
-
-        durations = (std::chrono::duration<uint64_t, std::nano> *) malloc(NUM_ITERATIONS * sizeof(std::chrono::duration<uint64_t, std::nano>)); 
-        reader_thread = std::thread(cpu_buffer_reader, buffer, result, (std::chrono::duration<uint64_t, std::nano> *) durations);
-
-        CPU_ZERO(&cpuset);
-        CPU_SET(0, &cpuset);
-        pthread_setaffinity_np(reader_thread.native_handle(), sizeof(cpu_set_t), &cpuset);
-    }
-
-    sleep(1);
-
-    std::cout << "[INFO] Spawning Writer" << std::endl;
     
     clock_t *reader_time_g;
     cudaMalloc(&reader_time_g, 1 * sizeof(clock_t));
-    
-    if (writer == CE_GPU) {
 
+    if (reader == CE_GPU && writer == CE_GPU) {
+        std::cout << "[INFO] Spawning GPU Reader and Writer" << std::endl;
+
+        cudaMalloc(&result, NUM_ITERATIONS * sizeof(DATA_SIZE));
+        cudaMalloc(&durations, NUM_ITERATIONS * sizeof(clock_t));
+        
         cudaMemcpy(reader_time_g, &gpu_reader_cycles, 1 * sizeof(clock_t), cudaMemcpyHostToDevice);
-        
+
+        gpu_buffer_reader_writer<<<1, 2, 0, stream_w>>>(buffer, reader_time_g, result, (clock_t *) durations);
+    } else {
+        std::cout << "[INFO] Spawning Reader" << std::endl;
+    
         if (reader == CE_GPU) {
-            gpu_buffer_writer<<<blocksPerGrid, threadsPerBlock, 0, stream_w>>>(buffer, chunkSize, reader_time_g);
+            cudaMalloc(&result, NUM_ITERATIONS * sizeof(DATA_SIZE));
+            
+            cudaMalloc(&durations, NUM_ITERATIONS * sizeof(clock_t));
+    
+            gpu_buffer_reader<<<1,1,0,stream_r>>>(buffer, result, (clock_t *) durations);
         } else if (reader == CE_CPU) {
-            gpu_buffer_writer_single_thread<<<1,1, 0, stream_w>>>(buffer, chunkSize, reader_time_g);
+            result = (DATA_SIZE *) malloc(NUM_ITERATIONS * sizeof(DATA_SIZE));
+    
+            durations = (std::chrono::duration<uint64_t, std::nano> *) malloc(NUM_ITERATIONS * sizeof(std::chrono::duration<uint64_t, std::nano>)); 
+            reader_thread = std::thread(cpu_buffer_reader, buffer, result, (std::chrono::duration<uint64_t, std::nano> *) durations);
+    
+            CPU_ZERO(&cpuset);
+            CPU_SET(0, &cpuset);
+            pthread_setaffinity_np(reader_thread.native_handle(), sizeof(cpu_set_t), &cpuset);
         }
+    
+        // sleep(1);
+        usleep(writer_invocation_delay);
+    
+        std::cout << "[INFO] Spawning Writer" << std::endl;
         
-    } else if (writer == CE_CPU) {
-        
-        writer_thread = std::thread(cpu_buffer_writer, buffer, ts);
-        
-        CPU_ZERO(&cpuset);
-        CPU_SET(1, &cpuset);
-        pthread_setaffinity_np(writer_thread.native_handle(), sizeof(cpu_set_t), &cpuset);
+     
+        if (writer == CE_GPU) {
+    
+            cudaMemcpy(reader_time_g, &gpu_reader_cycles, 1 * sizeof(clock_t), cudaMemcpyHostToDevice);
+
+            gpu_buffer_writer_single_thread<<<1,1, 0, stream_w>>>(buffer, chunkSize, reader_time_g);
+            
+        } else if (writer == CE_CPU) {
+            
+            writer_thread = std::thread(cpu_buffer_writer, buffer, ts);
+            
+            CPU_ZERO(&cpuset);
+            CPU_SET(1, &cpuset);
+            pthread_setaffinity_np(writer_thread.native_handle(), sizeof(cpu_set_t), &cpuset);
+        }
     }
+
     
     std::cout << "[INFO] Waiting for threads to finish" << std::endl;
     

@@ -3,6 +3,7 @@
 import os
 import subprocess
 import time
+import sys
 
 
 scopes = ['cuda::thread_scope_system', 'cuda::thread_scope_device', 'cuda::thread_scope_thread']
@@ -26,29 +27,33 @@ def run_all():
             
             for reader, writer in (['cpu', 'cpu'], ['cpu', 'gpu'], ['gpu', 'cpu'], ['gpu', 'gpu']):
                 if reader == writer == 'gpu':
-                    command = ["./" + file, '-m', 'cuda_malloc', '-r', reader, '-w', writer, '-o', f'results{output_file_num}.txt']
-                    if file[:-4] + "_cudamalloc_gpu_gpu.txt" in os.listdir():
-                        continue
-                    print("Running command: " + ' '.join(command))
-                    with open(file[:-4] + "_cudamalloc_gpu_gpu.txt", "w") as f:
-                        p = subprocess.Popen(command, stdout=f, stderr=subprocess.PIPE)
-                        output_file_num += 1
-                        while p.poll() is None:
-                            time.sleep(10)
-                        _, err = p.communicate()
+                    mem_alloc = ['cuda_malloc', 'malloc', 'dram', 'numa_device', 'numa_host']
+                    for mem in mem_alloc:
+                        command = ["./" + file, '-m', mem, '-r', reader, '-w', writer, '-o', f'results{output_file_num}.txt']
+                        if file[:-4] + f"_{mem}_gpu_gpu.txt" in os.listdir():
+                            continue
+                        print("Running command: " + ' '.join(command))
+                        with open(file[:-4] + f"_{mem}_gpu_gpu.txt", "w") as f:
+                            p = subprocess.Popen(command, stdout=f, stderr=subprocess.PIPE)
+                            output_file_num += 1
+                            while p.poll() is None:
+                                time.sleep(10)
+                            _, err = p.communicate()
                 elif reader == writer == 'cpu':
-                    command = ["./" + file, '-m', 'malloc', '-r', reader, '-w', writer, '-o', f'results{output_file_num}.txt']
-                    if file[:-4] + "_malloc_cpu_cpu.txt" in os.listdir():
-                        continue
-                    print("Running command: " + ' '.join(command))
-                    with open(file[:-4] + "_malloc_cpu_cpu.txt", "w") as f:
-                        p = subprocess.Popen(command, stdout=f, stderr=subprocess.PIPE)
-                        output_file_num += 1
-                        while p.poll() is None:
-                            time.sleep(10)
-                        _, err = p.communicate()
+                    mem_alloc = ['malloc', 'dram', 'numa_host', 'numa_device']
+                    for mem in mem_alloc:
+                        command = ["./" + file, '-m', mem, '-r', reader, '-w', writer, '-o', f'results{output_file_num}.txt']
+                        if file[:-4] + f"_{mem}_cpu_cpu.txt" in os.listdir():
+                            continue
+                        print("Running command: " + ' '.join(command))
+                        with open(file[:-4] + f"_{mem}_cpu_cpu.txt", "w") as f:
+                            p = subprocess.Popen(command, stdout=f, stderr=subprocess.PIPE)
+                            output_file_num += 1
+                            while p.poll() is None:
+                                time.sleep(10)
+                            _, err = p.communicate()
                 else:
-                    for mem_alloc in ['dram', 'um']:
+                    for mem_alloc in ['dram', 'um', 'malloc', 'numa_host', 'numa_device']:
                         command = ["./" + file, '-m', mem_alloc, '-r', reader, '-w', writer, '-o', f'results{output_file_num}.txt']
                         if file[:-4] + f"_{mem_alloc}_{reader}_{writer}.txt" in os.listdir():
                             continue
@@ -91,6 +96,23 @@ def run_all():
             #     _, err = p.communicate()
                 
             print("Finished " + file)
+     
+     
             
-run_all()
+if len(sys.argv) > 1 and sys.argv[1] == 'test':
+    print("testing")
+    for file in filenames:
+        if 'system' in file:
+            for reader, writer in [['gpu', 'gpu'], ['cpu', 'cpu'], ['cpu', 'gpu'], ['gpu', 'cpu']]:
+                command = ["./" + file, '-m', 'malloc', '-r', reader, '-w', writer, '-o', f'results.txt']
+                        # if file[:-4] + f"{reader}_{writer}.txt" in os.listdir():
+                        #     continue
+                print("Running command: " + ' '.join(command))
+                with open(f"{reader}_{writer}.txt", "w") as f:
+                    p = subprocess.Popen(command, stdout=f, stderr=subprocess.PIPE)
+                    while p.poll() is None:
+                        time.sleep(10)
+                    _, err = p.communicate()
+else:
+    run_all()
 

@@ -144,7 +144,23 @@ __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader(cuda::a
         duration[i] = end - begin;
         printf("[GPU-R] Iter %d Sum %lu Time %lu\n", i, results[i], duration[i]);
     }
-    
+}
+
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_diverge(cuda::atomic<DATA_SIZE, CUDA_THREAD_SCOPE> *buffer, DATA_SIZE *results, clock_t *duration) {
+
+    for (int i = 0; i < NUM_ITERATIONS; i++) {
+        results[i] = 0;
+    }
+
+    for (int i = 0; i < NUM_ITERATIONS; i++) {
+        clock_t begin = clock64();
+        for (int j = 0; j < BUFFER_SIZE; j++) {
+            results[i] = results[i] + buffer[j].load(cuda::memory_order_relaxed);
+        }
+        clock_t end = clock64();
+        duration[i] = end - begin;
+        printf("[GPU-R] Iter %d Sum %lu Time %lu\n", i, results[i], duration[i]);
+    }
 }
 
 __global__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_single_iter(cuda::atomic<DATA_SIZE, CUDA_THREAD_SCOPE> *buffer, int chunkSize) {
@@ -170,6 +186,35 @@ __global__ static void __attribute__((optimize("O0"))) gpu_buffer_writer(cuda::a
         printf("[GPU-W] Stop Iter %d\n", j);
         cudaSleep(*sleep_duration);
     }
+}
+
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_diverge(cuda::atomic<DATA_SIZE, CUDA_THREAD_SCOPE> *buffer, clock_t *sleep_duration) {
+    // int threadId = blockIdx.x * blockDim.x + threadIdx.x;
+    // int start = (threadId - 1) * chunkSize;
+    // int end = min(start + chunkSize, BUFFER_SIZE);
+
+    cudaSleep(*sleep_duration);
+
+    for (int j = 0; j < NUM_ITERATIONS / 1000; j++) {
+        printf("[GPU-W] Start Iter %d\n", j);
+        for (int i = 0; i < BUFFER_SIZE; ++i) {
+            buffer[i].store(j+1, cuda::memory_order_relaxed);
+        }
+        printf("[GPU-W] Stop Iter %d\n", j);
+        cudaSleep(*sleep_duration);
+    }
+}
+
+__global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_writer(cuda::atomic<DATA_SIZE, CUDA_THREAD_SCOPE> *buffer, clock_t *sleep_duration, DATA_SIZE *results, clock_t *duration) {
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (tid == 0) {
+        gpu_buffer_reader_diverge(buffer, results, duration);
+    } else {
+        gpu_buffer_writer_diverge(buffer, sleep_duration);
+    }
+
 }
 
 __global__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_single_thread(cuda::atomic<DATA_SIZE, CUDA_THREAD_SCOPE> *buffer, int chunkSize, clock_t *sleep_duration) {
@@ -333,38 +378,38 @@ int get_gpu_properties() {
     cudaGetDevice(&device);
     cudaGetDeviceProperties(&prop, device);
 
-    std::cout << "Device name: " << prop.name << std::endl;
-    std::cout << "Total Global Memory: " << prop.totalGlobalMem << std::endl;
-    std::cout << "Shared Memory per Block: " << prop.sharedMemPerBlock << std::endl;
-    std::cout << "Registers per Block: " << prop.regsPerBlock << std::endl;
-    std::cout << "Warp Size: " << prop.warpSize << std::endl;
-    std::cout << "Max Threads per Block: " << prop.maxThreadsPerBlock << std::endl;
-    std::cout << "Max Threads Dimension: " << prop.maxThreadsDim[0] << " " << prop.maxThreadsDim[1] << " " << prop.maxThreadsDim[2] << std::endl;
-    std::cout << "Max Grid Size: " << prop.maxGridSize[0] << " " << prop.maxGridSize[1] << " " << prop.maxGridSize[2] << std::endl;
-    std::cout << "Clock Rate: " << prop.clockRate << std::endl;
-    std::cout << "Total Constant Memory: " << prop.totalConstMem << std::endl;
-    std::cout << "Multiprocessor Count: " << prop.multiProcessorCount << std::endl;
-    std::cout << "Kernel Execution Timeout Enabled: " << prop.kernelExecTimeoutEnabled << std::endl;
-    std::cout << "Integrated: " << prop.integrated << std::endl;
-    std::cout << "Can Map Host Memory: " << prop.canMapHostMemory << std::endl;
-    std::cout << "Compute Mode: " << prop.computeMode << std::endl;
-    std::cout << "Concurrent Kernels: " << prop.concurrentKernels << std::endl;
-    std::cout << "ECC Enabled: " << prop.ECCEnabled << std::endl;
-    std::cout << "PCI Bus ID: " << prop.pciBusID << std::endl;
-    std::cout << "PCI Device ID: " << prop.pciDeviceID << std::endl;
-    std::cout << "TCC Driver: " << prop.tccDriver << std::endl;
-    std::cout << "Memory Clock Rate: " << prop.memoryClockRate << std::endl;
-    std::cout << "Memory Bus Width: " << prop.memoryBusWidth << std::endl;
-    std::cout << "L2 Cache Size: " << prop.l2CacheSize << std::endl;
-    std::cout << "Max Threads Per MultiProcessor: " << prop.maxThreadsPerMultiProcessor << std::endl;
-    std::cout << "Stream Priorities Supported: " << prop.streamPrioritiesSupported << std::endl;
-    std::cout << "Global L1 Cache Supported: " << prop.globalL1CacheSupported << std::endl;
-    std::cout << "Local L1 Cache Supported: " << prop.localL1CacheSupported << std::endl;
-    std::cout << "Shared Memory per Multiprocessor: " << prop.sharedMemPerMultiprocessor << std::endl;
-    std::cout << "Registers per Multiprocessor: " << prop.regsPerMultiprocessor << std::endl;
-    std::cout << "Managed Memory: " << prop.managedMemory << std::endl;
-    std::cout << "Is Multi-GPU Board: " << prop.isMultiGpuBoard << std::endl;
-    std::cout << "Multi-GPU Board Group ID: " << prop.multiGpuBoardGroupID << std::endl;
+    // std::cout << "Device name: " << prop.name << std::endl;
+    // std::cout << "Total Global Memory: " << prop.totalGlobalMem << std::endl;
+    // std::cout << "Shared Memory per Block: " << prop.sharedMemPerBlock << std::endl;
+    // std::cout << "Registers per Block: " << prop.regsPerBlock << std::endl;
+    // std::cout << "Warp Size: " << prop.warpSize << std::endl;
+    // std::cout << "Max Threads per Block: " << prop.maxThreadsPerBlock << std::endl;
+    // std::cout << "Max Threads Dimension: " << prop.maxThreadsDim[0] << " " << prop.maxThreadsDim[1] << " " << prop.maxThreadsDim[2] << std::endl;
+    // std::cout << "Max Grid Size: " << prop.maxGridSize[0] << " " << prop.maxGridSize[1] << " " << prop.maxGridSize[2] << std::endl;
+    // std::cout << "Clock Rate: " << prop.clockRate << std::endl;
+    // std::cout << "Total Constant Memory: " << prop.totalConstMem << std::endl;
+    // std::cout << "Multiprocessor Count: " << prop.multiProcessorCount << std::endl;
+    // std::cout << "Kernel Execution Timeout Enabled: " << prop.kernelExecTimeoutEnabled << std::endl;
+    // std::cout << "Integrated: " << prop.integrated << std::endl;
+    // std::cout << "Can Map Host Memory: " << prop.canMapHostMemory << std::endl;
+    // std::cout << "Compute Mode: " << prop.computeMode << std::endl;
+    // std::cout << "Concurrent Kernels: " << prop.concurrentKernels << std::endl;
+    // std::cout << "ECC Enabled: " << prop.ECCEnabled << std::endl;
+    // std::cout << "PCI Bus ID: " << prop.pciBusID << std::endl;
+    // std::cout << "PCI Device ID: " << prop.pciDeviceID << std::endl;
+    // std::cout << "TCC Driver: " << prop.tccDriver << std::endl;
+    // std::cout << "Memory Clock Rate: " << prop.memoryClockRate << std::endl;
+    // std::cout << "Memory Bus Width: " << prop.memoryBusWidth << std::endl;
+    // std::cout << "L2 Cache Size: " << prop.l2CacheSize << std::endl;
+    // std::cout << "Max Threads Per MultiProcessor: " << prop.maxThreadsPerMultiProcessor << std::endl;
+    // std::cout << "Stream Priorities Supported: " << prop.streamPrioritiesSupported << std::endl;
+    // std::cout << "Global L1 Cache Supported: " << prop.globalL1CacheSupported << std::endl;
+    // std::cout << "Local L1 Cache Supported: " << prop.localL1CacheSupported << std::endl;
+    // std::cout << "Shared Memory per Multiprocessor: " << prop.sharedMemPerMultiprocessor << std::endl;
+    // std::cout << "Registers per Multiprocessor: " << prop.regsPerMultiprocessor << std::endl;
+    // std::cout << "Managed Memory: " << prop.managedMemory << std::endl;
+    // std::cout << "Is Multi-GPU Board: " << prop.isMultiGpuBoard << std::endl;
+    // std::cout << "Multi-GPU Board Group ID: " << prop.multiGpuBoardGroupID << std::endl;
 
     
     return prop.clockRate;
