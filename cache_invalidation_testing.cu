@@ -158,245 +158,572 @@ int main(int argc, char* argv[]) {
     
     cpu_set_t cpuset;
 
-    if (reader == CE_GPU && writer == CE_GPU) {
-        std::cout << "[INFO] Spawning GPU Reader and Writer" << std::endl;
+    if (multi_producer) {
+        bufferElement_t * buffer_g_t; // GPU Thread Scope
+        cuda::atomic<uint32_t, cuda::thread_scope_thread> *g_w_signal_t;
 
-        bufferElement *buffer_g;
-        cudaMalloc(&buffer_g, BUFFER_SIZE * sizeof(bufferElement));
+        bufferElement_b * buffer_g_b; // GPU Block Scope
+        cuda::atomic<uint32_t, cuda::thread_scope_block> *g_w_signal_b;
 
-        cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *g_r_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_thread> *g_w_t_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_block> *g_w_b_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_device> *g_w_d_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_system> *g_w_s_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_system> *g_w_fb_signal; // Fallback Signal
+        bufferElement_d * buffer_g_d; // GPU Device Scope
+        cuda::atomic<uint32_t, cuda::thread_scope_device> *g_w_signal_d;
 
-        WriterType *g_spawn_writer;
-        WriterType c_spawn_writer = CE_WRITER;
+        bufferElement_s * buffer_g_s; // GPU System Scope
+        cuda::atomic<uint32_t, cuda::thread_scope_system> *g_w_signal_s;
 
-        cudaMalloc(&g_r_signal, 1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
-        cudaMalloc(&g_w_t_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
-        cudaMalloc(&g_w_b_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
-        cudaMalloc(&g_w_d_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
-        cudaMalloc(&g_w_s_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
-        cudaMalloc(&g_w_fb_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
-
-        cudaMalloc(&g_spawn_writer, 1 * sizeof(WriterType));
-        cudaMemcpy(g_spawn_writer, &c_spawn_writer, 1 * sizeof(WriterType), cudaMemcpyHostToDevice);
-
-
-        bufferElement_na * result;
-        cudaMalloc(&result, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
-
-        gpu_buffer_reader_writer_propagation_hierarchy<<<GPU_NUM_BLOCKS, GPU_NUM_THREADS>>>(buffer, buffer_g, result, g_r_signal, g_w_t_signal, g_w_b_signal, g_w_d_signal, g_w_s_signal, g_w_fb_signal, g_spawn_writer);
-
-        cudaDeviceSynchronize();
-
-        bufferElement_na * result_h;
-        result_h = (bufferElement_na *) malloc(GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
-
-        cudaMemcpy(result_h, result, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na), cudaMemcpyDeviceToHost);
-
-        for (int i = 0; i < GPU_NUM_BLOCKS; i++) {
-            for (int j = 0; j < GPU_NUM_THREADS; j++) {
-                if (result_h[i * GPU_NUM_THREADS + j].data > 2000000000) {
-                    std::cout << "[" << i << "][" << j << "] " << "--" << std::endl;
-                } else {
-                    std::cout << "[" << i << "][" << j << "] " << result_h[i * GPU_NUM_THREADS + j].data << std::endl;
-                }
-            }
-        }
-
-    } else if (reader == CE_CPU && writer == CE_CPU) {
-
-        std::cout << "[INFO] Spawning CPU Reader and Writer" << std::endl;
-
-        bufferElement *buffer_c;
-
-        buffer_c = (bufferElement *) malloc(BUFFER_SIZE * sizeof(bufferElement));
-
-        cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *c_r_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_thread> *c_w_t_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_block> *c_w_b_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_device> *c_w_d_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_system> *c_w_s_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_system> *c_w_fb_signal;
-
-        WriterType spawn_writer = CE_WRITER;
-
-        c_r_signal = (cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *) malloc(1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
-        c_w_t_signal = (cuda::atomic<uint32_t, cuda::thread_scope_thread> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
-        c_w_b_signal = (cuda::atomic<uint32_t, cuda::thread_scope_block> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
-        c_w_d_signal = (cuda::atomic<uint32_t, cuda::thread_scope_device> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
-        c_w_s_signal = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
-        c_w_fb_signal = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
-
-        c_r_signal->store(0);
-        c_w_t_signal->store(0);
-        c_w_b_signal->store(0);
-        c_w_d_signal->store(0);
-        c_w_s_signal->store(0);
-        c_w_fb_signal->store(0);
-
-        bufferElement_na *result;
-        result = (bufferElement_na *) malloc(CPU_NUM_THREADS * sizeof(bufferElement_na));
-
-        std::vector<std::thread> cpu_threads;
-
-        for (int i = 0; i < CPU_NUM_THREADS; i++) {
-            result[i].data = 0;
-            cpu_threads.push_back(std::thread(cpu_buffer_reader_writer_propagation_hierarchy, buffer, buffer_c, result, c_r_signal, c_w_t_signal, c_w_b_signal, c_w_d_signal, c_w_s_signal, c_w_fb_signal, &spawn_writer));
-
-            CPU_ZERO(&cpuset);
-            if (i == 0) {
-                CPU_SET(i, &cpuset);
-            } else {
-                CPU_SET(i+32, &cpuset);
-            }
-            pthread_setaffinity_np(cpu_threads[i].native_handle(), sizeof(cpu_set_t), &cpuset);
-        }
-        
-        for (int i = 0; i < CPU_NUM_THREADS; i++) {
-            cpu_threads[i].join();
-        }
-
-        for (int i = 0; i < CPU_NUM_THREADS; i++) {
-            std::cout << "C[" << i << "]";
-            
-            if (i % 4 == 0) {
-                std::cout << " Thread";
-            } else if (i % 4 == 1) {
-                std::cout << " Block";
-            } else if (i % 4 == 2) {
-                std::cout << " Device";
-            } else {
-                std::cout << " System";
-            }
-            
-            if (i % 8 < 4) {
-                std::cout << "-Rlx ";
-            } else {
-                std::cout << "-Acq ";
-            }
-            
-            std::cout << result[i].data << std::endl;
-        }
-    } else {
-        
-        bufferElement * dummy_buffer;
-        dummy_buffer = (bufferElement *) malloc(BUFFER_SIZE * sizeof(bufferElement));
-        
         bufferElement_na * result_g;
         bufferElement_na * result_c;
-        
-        cudaMalloc(&result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
-        result_c = (bufferElement_na *) malloc(CPU_NUM_THREADS * sizeof(bufferElement_na));
-        
-        WriterType *g_writer_type;
-        WriterType h_writer_type;
-        WriterType *c_writer_type;
-        
-        cudaMalloc(&g_writer_type, 1 * sizeof(WriterType));
-        c_writer_type = (WriterType *) malloc(1 * sizeof(WriterType));
-        
-        if (writer == CE_GPU) {
-            h_writer_type = CE_HET_WRITER;
-            *c_writer_type = CE_NO_WRITER;
-        } else {
-            h_writer_type = CE_NO_WRITER;
-            *c_writer_type = CE_HET_WRITER;
-        }
-        
-        cudaMemcpy(g_writer_type, &h_writer_type, 1 * sizeof(WriterType), cudaMemcpyHostToDevice);
-        
-        cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *cg_r_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_thread> *cg_w_t_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_block> *cg_w_b_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_device> *cg_w_d_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_system> *cg_w_s_signal;
-        cuda::atomic<uint32_t, cuda::thread_scope_system> *cg_w_fb_signal;
-        
-        cg_r_signal = (cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *) malloc(1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
-        cg_w_t_signal = (cuda::atomic<uint32_t, cuda::thread_scope_thread> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
-        cg_w_b_signal = (cuda::atomic<uint32_t, cuda::thread_scope_block> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
-        cg_w_d_signal = (cuda::atomic<uint32_t, cuda::thread_scope_device> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
-        cg_w_s_signal = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
-        cg_w_fb_signal = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
-        
-        cg_r_signal->store(0);
-        cg_w_t_signal->store(0);
-        cg_w_b_signal->store(0);
-        cg_w_d_signal->store(0);
-        cg_w_s_signal->store(0);
-        cg_w_fb_signal->store(0);
-        
-        std::cout << "[INFO] Spawning Heterogeneous Reader and Writer" << std::endl;
-        
-        gpu_buffer_reader_writer_propagation_hierarchy<<<GPU_NUM_BLOCKS, GPU_NUM_THREADS>>>(buffer, dummy_buffer, result_g, cg_r_signal, cg_w_t_signal, cg_w_b_signal, cg_w_d_signal, cg_w_s_signal, cg_w_fb_signal, g_writer_type);
 
-        std::vector<std::thread> cpu_threads;
+        cuda::atomic<uint32_t, cuda::thread_scope_system> *g_w_signal_fb; // Fallback Signal
+        cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *g_r_signal; // Cache-Ready Signal
+
+        bufferElement * dummy_buffer;
         
-        for (int i = 0; i < CPU_NUM_THREADS; i++) {
-            result_c[i].data = 0;
-            cpu_threads.push_back(std::thread(cpu_buffer_reader_writer_propagation_hierarchy, buffer, dummy_buffer, result_c, cg_r_signal, cg_w_t_signal, cg_w_b_signal, cg_w_d_signal, cg_w_s_signal, cg_w_fb_signal, c_writer_type));
+        
+        if (reader == CE_GPU && writer == CE_GPU) {
+
+            cudaMalloc(&dummy_buffer, BUFFER_SIZE * sizeof(bufferElement));
+
+            cudaMalloc(&buffer_g_t, BUFFER_SIZE * sizeof(bufferElement_t));
+            cudaMalloc(&g_w_signal_t, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
+    
+            cudaMalloc(&buffer_g_b, BUFFER_SIZE * sizeof(bufferElement_b));
+            cudaMalloc(&g_w_signal_b, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
+    
+            cudaMalloc(&buffer_g_d, BUFFER_SIZE * sizeof(bufferElement_d));
+            cudaMalloc(&g_w_signal_d, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
+    
+            cudaMalloc(&buffer_g_s, BUFFER_SIZE * sizeof(bufferElement_s));
+            cudaMalloc(&g_w_signal_s, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+
+            cudaMalloc(&result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            cudaMalloc(&g_w_signal_fb, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            cudaMalloc(&g_r_signal, 1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
+
+
+            cudaMemset(g_w_signal_fb, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            cudaMemset(g_r_signal, 0, 1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
+
+            cudaMemset(g_w_signal_t, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
+            cudaMemset(g_w_signal_b, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
+            cudaMemset(g_w_signal_d, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
+            cudaMemset(g_w_signal_s, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+
+            cudaMemset(result_g, 0, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            cudaMemset(buffer_g_t, 0, BUFFER_SIZE * sizeof(bufferElement_t));
+            cudaMemset(buffer_g_b, 0, BUFFER_SIZE * sizeof(bufferElement_b));
+            cudaMemset(buffer_g_d, 0, BUFFER_SIZE * sizeof(bufferElement_d));
+            cudaMemset(buffer_g_s, 0, BUFFER_SIZE * sizeof(bufferElement_s));
+
+
+            WriterType * spawn_writer;
+            WriterType c_spawn_writer = CE_MULTI_WRITER;
+
+            cudaMalloc(&spawn_writer, 1 * sizeof(WriterType));
+            cudaMemcpy(spawn_writer, &c_spawn_writer, 1 * sizeof(WriterType), cudaMemcpyHostToDevice);
+
+            gpu_buffer_reader_multi_writer_propagation_hierarchy<<<GPU_NUM_BLOCKS, GPU_NUM_THREADS>>>(dummy_buffer, buffer_g_t, buffer_g_b, buffer_g_d, buffer_g_s, result_g, g_r_signal, g_w_signal_t, g_w_signal_b, g_w_signal_d, g_w_signal_s, g_w_signal_fb, spawn_writer);
             
-            CPU_ZERO(&cpuset);
-            if (i == 0) {
-                CPU_SET(i, &cpuset);
-            } else {
-                CPU_SET(i+32, &cpuset);
-            }
-            // CPU_SET(i, &cpuset);
-            pthread_setaffinity_np(cpu_threads[i].native_handle(), sizeof(cpu_set_t), &cpuset);
-        }
+            cudaDeviceSynchronize();
 
-        cudaDeviceSynchronize();
+            bufferElement_na * result_h;
+            result_h = (bufferElement_na *) malloc(GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
 
-        for (int i = 0; i < CPU_NUM_THREADS; i++) {
-            cpu_threads[i].join();
-        }
+            cudaMemcpy(result_h, result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na), cudaMemcpyDeviceToHost);
 
-        std::cout << "[INFO] GPU Results" << std::endl;
 
-        bufferElement_na * result_g_h;
-        result_g_h = (bufferElement_na *) malloc(GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
-
-        cudaMemcpy(result_g_h, result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na), cudaMemcpyDeviceToHost);
-
-        for (int i = 0; i < GPU_NUM_BLOCKS; i++) {
-            for (int j = 0; j < GPU_NUM_THREADS; j++) {
-                if (result_g_h[i * GPU_NUM_THREADS + j].data > 2000000000) {
-                    std::cout << "[" << i << "][" << j << "] " << "--" << std::endl;
-                } else {
-                    std::cout << "[" << i << "][" << j << "] " << result_g_h[i * GPU_NUM_THREADS + j].data << std::endl;
+            for (int i = 0; i < GPU_NUM_BLOCKS; i++) {
+                for (int j = 0; j < GPU_NUM_THREADS; j++) {
+                    if (result_h[i * GPU_NUM_THREADS + j].data > 2000000000) {
+                        std::cout << "[" << i << "][" << j << "] " << "--" << std::endl;
+                    } else {
+                        std::cout << "[" << i << "][" << j << "] " << result_h[i * GPU_NUM_THREADS + j].data << std::endl;
+                    }
                 }
             }
-        }
 
-        std::cout << "[INFO] CPU Results" << std::endl;
+            cudaFree(buffer_g_t);
+            cudaFree(g_w_signal_t);
+    
+            cudaFree(buffer_g_b);
+            cudaFree(g_w_signal_b);
+    
+            cudaFree(buffer_g_d);
+            cudaFree(g_w_signal_d);
+    
+            cudaFree(buffer_g_s);
+            cudaFree(g_w_signal_s);
 
-        for (int i = 0; i < CPU_NUM_THREADS; i++) {
-            std::cout << "C[" << i << "]";
+            cudaFree(result_g);
+            cudaFree(g_w_signal_fb);
+            cudaFree(g_r_signal);
+
+        } else if (reader == CE_CPU && writer == CE_CPU) {
+
+            dummy_buffer = (bufferElement *) malloc(BUFFER_SIZE * sizeof(bufferElement));
+
+            buffer_g_t = (bufferElement_t *) malloc(BUFFER_SIZE * sizeof(bufferElement_t));
+            g_w_signal_t = (cuda::atomic<uint32_t, cuda::thread_scope_thread> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
+
+            buffer_g_b = (bufferElement_b *) malloc(BUFFER_SIZE * sizeof(bufferElement_b));
+            g_w_signal_b = (cuda::atomic<uint32_t, cuda::thread_scope_block> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
+
+            buffer_g_d = (bufferElement_d *) malloc(BUFFER_SIZE * sizeof(bufferElement_d));
+            g_w_signal_d = (cuda::atomic<uint32_t, cuda::thread_scope_device> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
+
+            buffer_g_s = (bufferElement_s *) malloc(BUFFER_SIZE * sizeof(bufferElement_s));
+            g_w_signal_s = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+
+            result_c = (bufferElement_na *) malloc(CPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            g_w_signal_fb = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            g_r_signal = (cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *) malloc(1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
+
+            memset(g_w_signal_fb, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            memset(g_r_signal, 0, 1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
+
+            memset(g_w_signal_t, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
+            memset(g_w_signal_b, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
+            memset(g_w_signal_d, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
+            memset(g_w_signal_s, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+
+            memset(result_c, 0, CPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            memset(buffer_g_t, 0, BUFFER_SIZE * sizeof(bufferElement_t));
+            memset(buffer_g_b, 0, BUFFER_SIZE * sizeof(bufferElement_b));
+            memset(buffer_g_d, 0, BUFFER_SIZE * sizeof(bufferElement_d));
+            memset(buffer_g_s, 0, BUFFER_SIZE * sizeof(bufferElement_s));
+
+            WriterType spawn_writer = CE_MULTI_WRITER;
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                result_c[i].data = 0;
+            }
+
+            std::vector<std::thread> cpu_threads;
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                cpu_threads.push_back(std::thread(cpu_buffer_reader_multi_writer_propagation_hierarchy, dummy_buffer, buffer_g_t, buffer_g_b, buffer_g_d, buffer_g_s, result_c, g_r_signal, g_w_signal_t, g_w_signal_b, g_w_signal_d, g_w_signal_s, g_w_signal_fb, &spawn_writer));
+
+                CPU_ZERO(&cpuset);
+                CPU_SET(i, &cpuset);
+                pthread_setaffinity_np(cpu_threads[i].native_handle(), sizeof(cpu_set_t), &cpuset);
+            }
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                cpu_threads[i].join();
+            }
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                std::cout << "C[" << i << "]";
+                
+                if (i % 4 == 0) {
+                    std::cout << " Thread";
+                } else if (i % 4 == 1) {
+                    std::cout << " Block";
+                } else if (i % 4 == 2) {
+                    std::cout << " Device";
+                } else {
+                    std::cout << " System";
+                }
+                
+                if (i % 8 < 4) {
+                    std::cout << "-Rlx ";
+                } else {
+                    std::cout << "-Acq ";
+                }
+                
+                std::cout << result_c[i].data << std::endl;
+            }
+
+            free(buffer_g_t);
+            free(g_w_signal_t);
+
+            free(buffer_g_b);
+            free(g_w_signal_b);
+
+            free(buffer_g_d);
+            free(g_w_signal_d);
+
+            free(buffer_g_s);
+            free(g_w_signal_s);
+
+            free(result_c);
+            free(g_w_signal_fb);
+            free(g_r_signal);
+
+        } else {
+            dummy_buffer = (bufferElement *) malloc(BUFFER_SIZE * sizeof(bufferElement));
+
+            buffer_g_t = (bufferElement_t *) malloc(BUFFER_SIZE * sizeof(bufferElement_t));
+            g_w_signal_t = (cuda::atomic<uint32_t, cuda::thread_scope_thread> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
+
+            buffer_g_b = (bufferElement_b *) malloc(BUFFER_SIZE * sizeof(bufferElement_b));
+            g_w_signal_b = (cuda::atomic<uint32_t, cuda::thread_scope_block> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
+
+            buffer_g_d = (bufferElement_d *) malloc(BUFFER_SIZE * sizeof(bufferElement_d));
+            g_w_signal_d = (cuda::atomic<uint32_t, cuda::thread_scope_device> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
+
+            buffer_g_s = (bufferElement_s *) malloc(BUFFER_SIZE * sizeof(bufferElement_s));
+            g_w_signal_s = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+
+            result_c = (bufferElement_na *) malloc(CPU_NUM_THREADS * sizeof(bufferElement_na));
+            cudaMalloc(&result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
             
-            if (i % 4 == 0) {
-                std::cout << " Thread";
-            } else if (i % 4 == 1) {
-                std::cout << " Block";
-            } else if (i % 4 == 2) {
-                std::cout << " Device";
+            g_w_signal_fb = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            g_r_signal = (cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *) malloc(1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
+
+            memset(g_w_signal_fb, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            memset(g_r_signal, 0, 1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
+
+            memset(g_w_signal_t, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
+            memset(g_w_signal_b, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
+            memset(g_w_signal_d, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
+            memset(g_w_signal_s, 0, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+
+            memset(result_c, 0, CPU_NUM_THREADS * sizeof(bufferElement_na));
+            cudaMemset(result_g, 0, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            memset(buffer_g_t, 0, BUFFER_SIZE * sizeof(bufferElement_t));
+            memset(buffer_g_b, 0, BUFFER_SIZE * sizeof(bufferElement_b));
+            memset(buffer_g_d, 0, BUFFER_SIZE * sizeof(bufferElement_d));
+            memset(buffer_g_s, 0, BUFFER_SIZE * sizeof(bufferElement_s));
+
+            WriterType *g_writer_type;
+            WriterType h_writer_type;
+
+            cudaMalloc(&g_writer_type, 1 * sizeof(WriterType));
+            WriterType *c_writer_type;
+            c_writer_type = (WriterType *) malloc(1 * sizeof(WriterType));
+
+            if (writer == CE_GPU) {
+                h_writer_type = CE_HET_WRITER;
+                *c_writer_type = CE_NO_WRITER;
             } else {
-                std::cout << " System";
+                h_writer_type = CE_NO_WRITER;
+                *c_writer_type = CE_HET_WRITER;
             }
 
-            if (i % 8 < 4) {
-                std::cout << "-Rlx ";
-            } else {
-                std::cout << "-Acq ";
+            cudaMemcpy(g_writer_type, &h_writer_type, 1 * sizeof(WriterType), cudaMemcpyHostToDevice);
+
+            std::vector<std::thread> cpu_threads;
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                cpu_threads.push_back(std::thread(cpu_buffer_reader_multi_writer_propagation_hierarchy, dummy_buffer, buffer_g_t, buffer_g_b, buffer_g_d, buffer_g_s, result_c, g_r_signal, g_w_signal_t, g_w_signal_b, g_w_signal_d, g_w_signal_s, g_w_signal_fb, c_writer_type));
+
+                CPU_ZERO(&cpuset);
+                CPU_SET(i, &cpuset);
+                pthread_setaffinity_np(cpu_threads[i].native_handle(), sizeof(cpu_set_t), &cpuset);
             }
 
-            std::cout << result_c[i].data << std::endl;
+            gpu_buffer_reader_multi_writer_propagation_hierarchy<<<GPU_NUM_BLOCKS, GPU_NUM_THREADS>>>(dummy_buffer, buffer_g_t, buffer_g_b, buffer_g_d, buffer_g_s, result_g, g_r_signal, g_w_signal_t, g_w_signal_b, g_w_signal_d, g_w_signal_s, g_w_signal_fb, g_writer_type);
+            
+            cudaDeviceSynchronize();
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                cpu_threads[i].join();
+            }
+
+            bufferElement_na * result_h;
+            result_h = (bufferElement_na *) malloc(GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            cudaMemcpy(result_h, result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na), cudaMemcpyDeviceToHost);
+
+            for (int i = 0; i < GPU_NUM_BLOCKS; i++) {
+                for (int j = 0; j < GPU_NUM_THREADS; j++) {
+                    if (result_h[i * GPU_NUM_THREADS + j].data > 2000000000) {
+                        std::cout << "[" << i << "][" << j << "] " << "--" << std::endl;
+                    } else {
+                        std::cout << "[" << i << "][" << j << "] " << result_h[i * GPU_NUM_THREADS + j].data << std::endl;
+                    }
+                }
+            }
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                std::cout << "C[" << i << "]";
+                
+                if (i % 4 == 0) {
+                    std::cout << " Thread";
+                } else if (i % 4 == 1) {
+                    std::cout << " Block";
+                } else if (i % 4 == 2) {
+                    std::cout << " Device";
+                } else {
+                    std::cout << " System";
+                }
+                
+                if (i % 8 < 4) {
+                    std::cout << "-Rlx ";
+                } else {
+                    std::cout << "-Acq ";
+                }
+                
+                std::cout << result_c[i].data << std::endl;
+            }
+
+            free(buffer_g_t);
+            free(g_w_signal_t);
+
+            free(buffer_g_b);
+            free(g_w_signal_b);
+
+            free(buffer_g_d);
+            free(g_w_signal_d);
+
+            free(buffer_g_s);
+            free(g_w_signal_s);
+
+            free(result_c);
+            free(g_w_signal_fb);
+            free(g_r_signal);
+
+            cudaFree(result_g);
+            cudaFree(g_writer_type);
+
         }
         
+    } else {
+        if (reader == CE_GPU && writer == CE_GPU) {
+            std::cout << "[INFO] Spawning GPU Reader and Writer" << std::endl;
+
+            bufferElement *buffer_g;
+            cudaMalloc(&buffer_g, BUFFER_SIZE * sizeof(bufferElement));
+
+            cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *g_r_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_thread> *g_w_t_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_block> *g_w_b_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_device> *g_w_d_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_system> *g_w_s_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_system> *g_w_fb_signal; // Fallback Signal
+
+            WriterType *g_spawn_writer;
+            WriterType c_spawn_writer = CE_WRITER;
+
+            cudaMalloc(&g_r_signal, 1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
+            cudaMalloc(&g_w_t_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
+            cudaMalloc(&g_w_b_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
+            cudaMalloc(&g_w_d_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
+            cudaMalloc(&g_w_s_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            cudaMalloc(&g_w_fb_signal, 1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+
+            cudaMalloc(&g_spawn_writer, 1 * sizeof(WriterType));
+            cudaMemcpy(g_spawn_writer, &c_spawn_writer, 1 * sizeof(WriterType), cudaMemcpyHostToDevice);
+
+
+            bufferElement_na * result;
+            cudaMalloc(&result, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            gpu_buffer_reader_writer_propagation_hierarchy<<<GPU_NUM_BLOCKS, GPU_NUM_THREADS>>>(buffer, buffer_g, result, g_r_signal, g_w_t_signal, g_w_b_signal, g_w_d_signal, g_w_s_signal, g_w_fb_signal, g_spawn_writer);
+
+            cudaDeviceSynchronize();
+
+            bufferElement_na * result_h;
+            result_h = (bufferElement_na *) malloc(GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            cudaMemcpy(result_h, result, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na), cudaMemcpyDeviceToHost);
+
+            for (int i = 0; i < GPU_NUM_BLOCKS; i++) {
+                for (int j = 0; j < GPU_NUM_THREADS; j++) {
+                    if (result_h[i * GPU_NUM_THREADS + j].data > 2000000000) {
+                        std::cout << "[" << i << "][" << j << "] " << "--" << std::endl;
+                    } else {
+                        std::cout << "[" << i << "][" << j << "] " << result_h[i * GPU_NUM_THREADS + j].data << std::endl;
+                    }
+                }
+            }
+
+        } else if (reader == CE_CPU && writer == CE_CPU) {
+
+            std::cout << "[INFO] Spawning CPU Reader and Writer" << std::endl;
+
+            bufferElement *buffer_c;
+
+            buffer_c = (bufferElement *) malloc(BUFFER_SIZE * sizeof(bufferElement));
+
+            cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *c_r_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_thread> *c_w_t_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_block> *c_w_b_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_device> *c_w_d_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_system> *c_w_s_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_system> *c_w_fb_signal;
+
+            WriterType spawn_writer = CE_WRITER;
+
+            c_r_signal = (cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *) malloc(1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
+            c_w_t_signal = (cuda::atomic<uint32_t, cuda::thread_scope_thread> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
+            c_w_b_signal = (cuda::atomic<uint32_t, cuda::thread_scope_block> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
+            c_w_d_signal = (cuda::atomic<uint32_t, cuda::thread_scope_device> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
+            c_w_s_signal = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            c_w_fb_signal = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+
+            c_r_signal->store(0);
+            c_w_t_signal->store(0);
+            c_w_b_signal->store(0);
+            c_w_d_signal->store(0);
+            c_w_s_signal->store(0);
+            c_w_fb_signal->store(0);
+
+            bufferElement_na *result;
+            result = (bufferElement_na *) malloc(CPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            std::vector<std::thread> cpu_threads;
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                result[i].data = 0;
+                cpu_threads.push_back(std::thread(cpu_buffer_reader_writer_propagation_hierarchy, buffer, buffer_c, result, c_r_signal, c_w_t_signal, c_w_b_signal, c_w_d_signal, c_w_s_signal, c_w_fb_signal, &spawn_writer));
+
+                CPU_ZERO(&cpuset);
+                if (i == 0) {
+                    CPU_SET(i, &cpuset);
+                } else {
+                    CPU_SET(i+32, &cpuset);
+                }
+                pthread_setaffinity_np(cpu_threads[i].native_handle(), sizeof(cpu_set_t), &cpuset);
+            }
+            
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                cpu_threads[i].join();
+            }
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                std::cout << "C[" << i << "]";
+                
+                if (i % 4 == 0) {
+                    std::cout << " Thread";
+                } else if (i % 4 == 1) {
+                    std::cout << " Block";
+                } else if (i % 4 == 2) {
+                    std::cout << " Device";
+                } else {
+                    std::cout << " System";
+                }
+                
+                if (i % 8 < 4) {
+                    std::cout << "-Rlx ";
+                } else {
+                    std::cout << "-Acq ";
+                }
+                
+                std::cout << result[i].data << std::endl;
+            }
+        } else {
+            
+            bufferElement * dummy_buffer;
+            dummy_buffer = (bufferElement *) malloc(BUFFER_SIZE * sizeof(bufferElement));
+            
+            bufferElement_na * result_g;
+            bufferElement_na * result_c;
+            
+            cudaMalloc(&result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
+            result_c = (bufferElement_na *) malloc(CPU_NUM_THREADS * sizeof(bufferElement_na));
+            
+            WriterType *g_writer_type;
+            WriterType h_writer_type;
+            WriterType *c_writer_type;
+            
+            cudaMalloc(&g_writer_type, 1 * sizeof(WriterType));
+            c_writer_type = (WriterType *) malloc(1 * sizeof(WriterType));
+            
+            if (writer == CE_GPU) {
+                h_writer_type = CE_HET_WRITER;
+                *c_writer_type = CE_NO_WRITER;
+            } else {
+                h_writer_type = CE_NO_WRITER;
+                *c_writer_type = CE_HET_WRITER;
+            }
+            
+            cudaMemcpy(g_writer_type, &h_writer_type, 1 * sizeof(WriterType), cudaMemcpyHostToDevice);
+            
+            cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *cg_r_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_thread> *cg_w_t_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_block> *cg_w_b_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_device> *cg_w_d_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_system> *cg_w_s_signal;
+            cuda::atomic<uint32_t, cuda::thread_scope_system> *cg_w_fb_signal;
+            
+            cg_r_signal = (cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *) malloc(1 * sizeof(cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE>));
+            cg_w_t_signal = (cuda::atomic<uint32_t, cuda::thread_scope_thread> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_thread>));
+            cg_w_b_signal = (cuda::atomic<uint32_t, cuda::thread_scope_block> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_block>));
+            cg_w_d_signal = (cuda::atomic<uint32_t, cuda::thread_scope_device> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_device>));
+            cg_w_s_signal = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            cg_w_fb_signal = (cuda::atomic<uint32_t, cuda::thread_scope_system> *) malloc(1 * sizeof(cuda::atomic<uint32_t, cuda::thread_scope_system>));
+            
+            cg_r_signal->store(0);
+            cg_w_t_signal->store(0);
+            cg_w_b_signal->store(0);
+            cg_w_d_signal->store(0);
+            cg_w_s_signal->store(0);
+            cg_w_fb_signal->store(0);
+            
+            std::cout << "[INFO] Spawning Heterogeneous Reader and Writer" << std::endl;
+            
+            gpu_buffer_reader_writer_propagation_hierarchy<<<GPU_NUM_BLOCKS, GPU_NUM_THREADS>>>(buffer, dummy_buffer, result_g, cg_r_signal, cg_w_t_signal, cg_w_b_signal, cg_w_d_signal, cg_w_s_signal, cg_w_fb_signal, g_writer_type);
+
+            std::vector<std::thread> cpu_threads;
+            
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                result_c[i].data = 0;
+                cpu_threads.push_back(std::thread(cpu_buffer_reader_writer_propagation_hierarchy, buffer, dummy_buffer, result_c, cg_r_signal, cg_w_t_signal, cg_w_b_signal, cg_w_d_signal, cg_w_s_signal, cg_w_fb_signal, c_writer_type));
+                
+                CPU_ZERO(&cpuset);
+                if (i == 0) {
+                    CPU_SET(i, &cpuset);
+                } else {
+                    CPU_SET(i+32, &cpuset);
+                }
+                // CPU_SET(i, &cpuset);
+                pthread_setaffinity_np(cpu_threads[i].native_handle(), sizeof(cpu_set_t), &cpuset);
+            }
+
+            cudaDeviceSynchronize();
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                cpu_threads[i].join();
+            }
+
+            std::cout << "[INFO] GPU Results" << std::endl;
+
+            bufferElement_na * result_g_h;
+            result_g_h = (bufferElement_na *) malloc(GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
+
+            cudaMemcpy(result_g_h, result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na), cudaMemcpyDeviceToHost);
+
+            for (int i = 0; i < GPU_NUM_BLOCKS; i++) {
+                for (int j = 0; j < GPU_NUM_THREADS; j++) {
+                    if (result_g_h[i * GPU_NUM_THREADS + j].data > 2000000000) {
+                        std::cout << "[" << i << "][" << j << "] " << "--" << std::endl;
+                    } else {
+                        std::cout << "[" << i << "][" << j << "] " << result_g_h[i * GPU_NUM_THREADS + j].data << std::endl;
+                    }
+                }
+            }
+
+            std::cout << "[INFO] CPU Results" << std::endl;
+
+            for (int i = 0; i < CPU_NUM_THREADS; i++) {
+                std::cout << "C[" << i << "]";
+                
+                if (i % 4 == 0) {
+                    std::cout << " Thread";
+                } else if (i % 4 == 1) {
+                    std::cout << " Block";
+                } else if (i % 4 == 2) {
+                    std::cout << " Device";
+                } else {
+                    std::cout << " System";
+                }
+
+                if (i % 8 < 4) {
+                    std::cout << "-Rlx ";
+                } else {
+                    std::cout << "-Acq ";
+                }
+
+                std::cout << result_c[i].data << std::endl;
+            }
+        }
     }
 
     std::cout << "[INFO] Done, Freeing Memory" << std::endl;

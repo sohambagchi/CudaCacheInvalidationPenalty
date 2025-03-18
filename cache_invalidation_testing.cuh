@@ -12,7 +12,7 @@
 #define BUFFER_SIZE 512
 #define NUM_ITERATIONS 10000
 
-#define GPU_NUM_BLOCKS 4
+#define GPU_NUM_BLOCKS 8
 #define GPU_NUM_THREADS 64
 
 #define CPU_NUM_THREADS 32
@@ -72,7 +72,8 @@ typedef enum {
 typedef enum {
     CE_NO_WRITER,
     CE_WRITER,
-    CE_HET_WRITER
+    CE_HET_WRITER,
+    CE_MULTI_WRITER
 } WriterType;
 
 typedef struct bufferElement {
@@ -80,6 +81,30 @@ typedef struct bufferElement {
     cuda::atomic<DATA_SIZE, CUDA_THREAD_SCOPE> data;
     char padding[4096 - sizeof(DATA_SIZE)];
 } bufferElement;
+
+typedef struct bufferElement_t {
+    // DATA_SIZE data;
+    cuda::atomic<DATA_SIZE, cuda::thread_scope_thread> data;
+    char padding[4096 - sizeof(DATA_SIZE)];
+} bufferElement_t;
+
+typedef struct bufferElement_b {
+    // DATA_SIZE data;
+    cuda::atomic<DATA_SIZE, cuda::thread_scope_block> data;
+    char padding[4096 - sizeof(DATA_SIZE)];
+} bufferElement_b;
+
+typedef struct bufferElement_d {
+    // DATA_SIZE data;
+    cuda::atomic<DATA_SIZE, cuda::thread_scope_device> data;
+    char padding[4096 - sizeof(DATA_SIZE)];
+} bufferElement_d;
+
+typedef struct bufferElement_s {
+    // DATA_SIZE data;
+    cuda::atomic<DATA_SIZE, cuda::thread_scope_system> data;
+    char padding[4096 - sizeof(DATA_SIZE)];
+} bufferElement_s;
 
 typedef struct bufferElement_na {
     uint32_t data;
@@ -667,8 +692,8 @@ __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_writer_
 
 
 
-template <typename T>
-__device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propagation_hierarchy_acq(bufferElement * buffer, bufferElement_na * results, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, T *w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fallback_signal) {
+template <typename B, typename W, typename R>
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propagation_hierarchy_acq(B * buffer, bufferElement_na * results, R * r_signal, W *w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fallback_signal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     uint result = 0;
@@ -684,7 +709,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propaga
 
     result = 0;
 
-    while(w_signal->load(cuda::memory_order_relaxed) == 0 && fallback_signal->load(cuda::memory_order_relaxed) == 0) {
+    while(w_signal->load(cuda::memory_order_relaxed) == 0 && fallback_signal->load(cuda::memory_order_relaxed) < 3) {
         // Wait for Writer Signal
     }
 
@@ -697,8 +722,8 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propaga
     printf("B[%d] T[%d] (%d:%d:%d) Result %d\n", blockIdx.x, threadIdx.x, threadIdx.x / 32, threadIdx.x % 8, threadIdx.x % 4, results[tid].data);
 }
 
-template <typename T>
-__device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propagation_hierarchy_rlx(bufferElement *buffer, bufferElement_na *results, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *r_signal, T *w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> *fallback_signal) {
+template <typename B, typename W, typename R>
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propagation_hierarchy_rlx(B *buffer, bufferElement_na *results, R *r_signal, W *w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> *fallback_signal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     
     uint result = 0;
@@ -714,7 +739,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propaga
     
     result = 0;
     
-    while(w_signal->load(cuda::memory_order_relaxed) == 0 && fallback_signal->load(cuda::memory_order_relaxed) == 0) {
+    while(w_signal->load(cuda::memory_order_relaxed) == 0 && fallback_signal->load(cuda::memory_order_relaxed) < 3) {
         // Wait for Writer Signal
     }
 
@@ -787,7 +812,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
 
     cudaSleep(10000000000);
     
-    fallback_signal->store(1, cuda::memory_order_release);
+    fallback_signal->store(4, cuda::memory_order_release);
 }
 
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propagation_hierarchy_cpu(bufferElement *buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *r_signal, cuda::atomic<uint32_t, cuda::thread_scope_thread> *w_t_signal, cuda::atomic<uint32_t, cuda::thread_scope_block> *w_b_signal, cuda::atomic<uint32_t, cuda::thread_scope_device> *w_d_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> *w_s_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> *fallback_signal
@@ -848,7 +873,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
 
     cudaSleep(10000000000);
 
-    fallback_signal->store(1, cuda::memory_order_release);
+    fallback_signal->store(4, cuda::memory_order_release);
 }
 
 __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_writer_propagation_hierarchy(bufferElement *buffer, bufferElement *w_buffer, bufferElement_na * results, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> *r_signal, cuda::atomic<uint32_t, cuda::thread_scope_thread> *w_t_signal, cuda::atomic<uint32_t, cuda::thread_scope_block> *w_b_signal, cuda::atomic<uint32_t, cuda::thread_scope_device> *w_d_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> *w_s_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> *fallback_signal, WriterType *spawn_writer) {
@@ -1012,12 +1037,12 @@ static void __attribute__((optimize("O0"))) cpu_buffer_writer_propagation_hierar
 
     sleep(5);
 
-    fallback_signal->store(1, cuda::memory_order_release);
+    fallback_signal->store(4, cuda::memory_order_release);
 
 }
 
-template <typename R, typename W, typename F>
-static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierarchy_acq(bufferElement *buffer, bufferElement_na * results, R *r_signal, W *w_signal, F *fallback_signal) {
+template <typename B, typename R, typename W, typename F>
+static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierarchy_acq(B *buffer, bufferElement_na * results, R *r_signal, W *w_signal, F *fallback_signal) {
     
     int core_id = sched_getcpu();
 
@@ -1033,7 +1058,7 @@ static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierar
 
     result = 0;
 
-    while (w_signal->load(cuda::memory_order_relaxed) == 0 && fallback_signal->load(cuda::memory_order_relaxed) == 0) {
+    while (w_signal->load(cuda::memory_order_relaxed) == 0 && fallback_signal->load(cuda::memory_order_relaxed) < 3) {
         // Wait for Writer Signal
     }
 
@@ -1046,8 +1071,8 @@ static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierar
     printf("C[%d:%d:%d] Result %d\n", core_id, core_id % 8, core_id % 4, results[core_id % CPU_NUM_THREADS].data);
 }
 
-template <typename R, typename W, typename F>
-static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierarchy_rlx(bufferElement *buffer, bufferElement_na * results, R *r_signal, W *w_signal, F *fallback_signal) {
+template <typename B, typename R, typename W, typename F>
+static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierarchy_rlx(B *buffer, bufferElement_na * results, R *r_signal, W *w_signal, F *fallback_signal) {
     
     int core_id = sched_getcpu();
 
@@ -1063,7 +1088,7 @@ static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierar
 
     result = 0;
 
-    while (w_signal->load(cuda::memory_order_relaxed) == 0 && fallback_signal->load(cuda::memory_order_relaxed) == 0) {
+    while (w_signal->load(cuda::memory_order_relaxed) == 0 && fallback_signal->load(cuda::memory_order_relaxed) < 3) {
         // Wait for Writer Signal
     }
 
@@ -1129,7 +1154,7 @@ static void __attribute__((optimize("O0"))) cpu_buffer_writer_propagation_hierar
 
     sleep(5);
 
-    fallback_signal->store(1, cuda::memory_order_release);
+    fallback_signal->store(4, cuda::memory_order_release);
 }
 
 template <typename R>
@@ -1183,6 +1208,661 @@ static void __attribute__((optimize("O0"))) cpu_buffer_reader_writer_propagation
         } else if (core_id % 8 == 7) {
             cpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
             // cpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_s_signal, fallback_signal);
+        }
+    }
+}
+
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_thread_propagation_hierarchy_cpu(bufferElement_t * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_thread> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+
+    printf("GPU Thread Het-Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
+
+    uint result = 0; 
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    cudaSleep(10000000000);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(10, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    cudaSleep(10000000000);
+    
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(1, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_block_propagation_hierarchy_cpu(bufferElement_b * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_block> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+
+    printf("GPU Block Het-Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
+
+    uint result = 0; 
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    cudaSleep(10000000000);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(20, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    cudaSleep(10000000000);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(2, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_device_propagation_hierarchy_cpu(bufferElement_d * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_device> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+
+    printf("GPU Device Het-Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
+
+    uint result = 0; 
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    cudaSleep(10000000000);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(30, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    cudaSleep(10000000000);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(3, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_system_propagation_hierarchy_cpu(bufferElement_s * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+
+    printf("GPU System Het-Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
+
+    uint result = 0; 
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    cudaSleep(10000000000);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(40, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    cudaSleep(10000000000);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(4, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_thread_propagation_hierarchy(bufferElement_t * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_thread> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+
+    printf("GPU Thread Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
+
+    uint result = 0; 
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    cudaSleep(10000000000);
+
+    while (r_signal->load(cuda::memory_order_acquire) != GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(10, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    cudaSleep(10000000000);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(1, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_block_propagation_hierarchy(bufferElement_b * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_block> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+
+    printf("GPU Block Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
+
+    uint result = 0; 
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    cudaSleep(10000000000);
+
+    while (r_signal->load(cuda::memory_order_acquire) != GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(20, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    cudaSleep(10000000000);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(2, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_device_propagation_hierarchy(bufferElement_d * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_device> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+
+    printf("GPU Device Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
+
+    uint result = 0; 
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    cudaSleep(10000000000);
+
+    while (r_signal->load(cuda::memory_order_acquire) != GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(30, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    cudaSleep(10000000000);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(3, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_system_propagation_hierarchy(bufferElement_s * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+
+    printf("GPU System Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
+
+    uint result = 0; 
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    cudaSleep(10000000000);
+
+    while (r_signal->load(cuda::memory_order_acquire) != GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(40, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    cudaSleep(10000000000);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(4, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+__global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_multi_writer_propagation_hierarchy(bufferElement * dummy_buffer, bufferElement_t * buffer_t, bufferElement_b * buffer_b, bufferElement_d * buffer_d, bufferElement_s * buffer_s, bufferElement_na * results, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_thread> * w_signal_t, cuda::atomic<uint32_t, cuda::thread_scope_block> * w_signal_b, cuda::atomic<uint32_t, cuda::thread_scope_device> * w_signal_d, cuda::atomic<uint32_t, cuda::thread_scope_system> * w_signal_s,  cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal, WriterType *spawn_writer) {
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (*spawn_writer != CE_NO_WRITER && tid == 0 && bid >= 0 && bid < 4) {
+
+        switch (bid) {
+            case 0: 
+                if (*spawn_writer == CE_HET_WRITER) {
+                    gpu_buffer_multi_writer_thread_propagation_hierarchy_cpu(buffer_t, r_signal, w_signal_t, fb_signal);
+                } else {
+                    gpu_buffer_multi_writer_thread_propagation_hierarchy(buffer_t, r_signal, w_signal_t, fb_signal);
+                }
+                break;
+            case 1:
+                if (*spawn_writer == CE_HET_WRITER) {
+                    gpu_buffer_multi_writer_block_propagation_hierarchy_cpu(buffer_b, r_signal, w_signal_b, fb_signal);
+                } else {
+                    gpu_buffer_multi_writer_block_propagation_hierarchy(buffer_b, r_signal, w_signal_b, fb_signal);
+                }
+                break;
+            case 2:
+                if (*spawn_writer == CE_HET_WRITER) {
+                    gpu_buffer_multi_writer_device_propagation_hierarchy_cpu(buffer_d, r_signal, w_signal_d, fb_signal);
+                } else {
+                    gpu_buffer_multi_writer_device_propagation_hierarchy(buffer_d, r_signal, w_signal_d, fb_signal);
+                }
+                break;
+            case 3:
+                if (*spawn_writer == CE_HET_WRITER) {
+                    gpu_buffer_multi_writer_system_propagation_hierarchy_cpu(buffer_s, r_signal, w_signal_s, fb_signal);
+                } else {
+                    gpu_buffer_multi_writer_system_propagation_hierarchy(buffer_s, r_signal, w_signal_s, fb_signal);
+                }
+                break;
+            default:
+                break;
+        }
+    } else {
+        switch (global_tid % 8) {
+            case 0:
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                gpu_buffer_reader_propagation_hierarchy_rlx(buffer_t, results, r_signal, w_signal_t, fb_signal);
+                break;
+            case 1:
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                gpu_buffer_reader_propagation_hierarchy_rlx(buffer_b, results, r_signal, w_signal_b, fb_signal);
+                break;
+            case 2:
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                gpu_buffer_reader_propagation_hierarchy_rlx(buffer_d, results, r_signal, w_signal_d, fb_signal);
+                break;
+            case 3:
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                gpu_buffer_reader_propagation_hierarchy_rlx(buffer_s, results, r_signal, w_signal_s, fb_signal);
+                break;
+            case 4:
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                gpu_buffer_reader_propagation_hierarchy_acq(buffer_t, results, r_signal, w_signal_t, fb_signal);
+                break;
+            case 5:
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                gpu_buffer_reader_propagation_hierarchy_acq(buffer_b, results, r_signal, w_signal_b, fb_signal);
+                break;
+            case 6:
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                gpu_buffer_reader_propagation_hierarchy_acq(buffer_d, results, r_signal, w_signal_d, fb_signal);
+                break;
+            case 7:
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                gpu_buffer_reader_propagation_hierarchy_acq(buffer_s, results, r_signal, w_signal_s, fb_signal);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_thread_propagation_hierarchy(bufferElement_t * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_thread> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+    
+    printf("CPU Writer %d\n", sched_getcpu());
+
+    uint result = 0;
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    sleep(5);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(10, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    sleep(5);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(1, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_block_propagation_hierarchy(bufferElement_b * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_block> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+    
+    printf("CPU Writer %d\n", sched_getcpu());
+
+    uint result = 0;
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    sleep(5);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(20, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    sleep(5);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(2, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_device_propagation_hierarchy(bufferElement_d * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_device> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+    
+    printf("CPU Writer %d\n", sched_getcpu());
+
+    uint result = 0;
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    sleep(5);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(30, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    sleep(5);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(3, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_system_propagation_hierarchy(bufferElement_s * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+    
+    printf("CPU Writer %d\n", sched_getcpu());
+
+    uint result = 0;
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    sleep(5);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(40, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    sleep(5);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(4, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_thread_propagation_hierarchy_gpu(bufferElement_t * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_thread> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+    
+    printf("CPU Het-Writer %d %d\n", sched_getcpu(), CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4);
+    // int core_id = sched_getcpu();
+
+    uint result = 0;
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    sleep(5);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(10, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    sleep(5);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(1, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_block_propagation_hierarchy_gpu(bufferElement_b * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_block> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+    
+    printf("CPU Het-Writer %d %d\n", sched_getcpu(), CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4);
+    // int core_id = sched_getcpu();
+
+    uint result = 0;
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    sleep(5);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(20, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    sleep(5);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(2, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_device_propagation_hierarchy_gpu(bufferElement_d * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_device> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+    
+    printf("CPU Het-Writer %d %d\n", sched_getcpu(), CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4);
+    // int core_id = sched_getcpu();
+
+    uint result = 0;
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    sleep(5);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(30, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    sleep(5);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(3, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_system_propagation_hierarchy_gpu(bufferElement_s * buffer, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * w_signal, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal) {
+    
+    printf("CPU Het-Writer %d %d\n", sched_getcpu(), CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4);
+    // int core_id = sched_getcpu();
+
+    uint result = 0;
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    sleep(5);
+
+    while (r_signal->load(cuda::memory_order_acquire) != CPU_NUM_THREADS + (GPU_NUM_BLOCKS * GPU_NUM_THREADS) - 4) {
+        // Wait for Reader Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(40, cuda::memory_order_relaxed);
+    }
+
+    w_signal->store(1, cuda::memory_order_release);
+
+    sleep(5);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        buffer[i].data.store(4, cuda::memory_order_relaxed);
+    }
+
+    fb_signal->fetch_add(1, cuda::memory_order_relaxed);
+}
+
+static void __attribute__((optimize("O0"))) cpu_buffer_reader_multi_writer_propagation_hierarchy(bufferElement * dummy_buffer, bufferElement_t * buffer_t, bufferElement_b * buffer_b, bufferElement_d * buffer_d, bufferElement_s * buffer_s, bufferElement_na * results, cuda::atomic<uint32_t, SIGNAL_THREAD_SCOPE> * r_signal, cuda::atomic<uint32_t, cuda::thread_scope_thread> * w_signal_t, cuda::atomic<uint32_t, cuda::thread_scope_block> * w_signal_b, cuda::atomic<uint32_t, cuda::thread_scope_device> * w_signal_d, cuda::atomic<uint32_t, cuda::thread_scope_system> * w_signal_s, cuda::atomic<uint32_t, cuda::thread_scope_system> * fb_signal, WriterType * spawn_writer) {
+    int core_id = sched_getcpu();
+
+    if (*spawn_writer != CE_NO_WRITER && core_id % 8 == 0) {
+        switch (core_id / 8) {
+            case 0:
+                if (*spawn_writer == CE_HET_WRITER) {
+                    cpu_buffer_multi_writer_thread_propagation_hierarchy_gpu(buffer_t, r_signal, w_signal_t, fb_signal);
+                } else {
+                    cpu_buffer_multi_writer_thread_propagation_hierarchy(buffer_t, r_signal, w_signal_t, fb_signal);
+                }
+                break;
+            case 1:
+                if (*spawn_writer == CE_HET_WRITER) {
+                    cpu_buffer_multi_writer_block_propagation_hierarchy_gpu(buffer_b, r_signal, w_signal_b, fb_signal);
+                } else {
+                    cpu_buffer_multi_writer_block_propagation_hierarchy(buffer_b, r_signal, w_signal_b, fb_signal);
+                }
+                break;
+            case 2:
+                if (*spawn_writer == CE_HET_WRITER) {
+                    cpu_buffer_multi_writer_device_propagation_hierarchy_gpu(buffer_d, r_signal, w_signal_d, fb_signal);
+                } else {
+                    cpu_buffer_multi_writer_device_propagation_hierarchy(buffer_d, r_signal, w_signal_d, fb_signal);
+                }
+                break;
+            case 3:
+                if (*spawn_writer == CE_HET_WRITER) {
+                    cpu_buffer_multi_writer_system_propagation_hierarchy_gpu(buffer_s, r_signal, w_signal_s, fb_signal);
+                } else {
+                    cpu_buffer_multi_writer_system_propagation_hierarchy(buffer_s, r_signal, w_signal_s, fb_signal);
+                }
+                break;
+            default:
+                break;
+        }
+    } else {
+        switch (core_id % 8) {
+            case 0:
+                // cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                cpu_buffer_reader_propagation_hierarchy_rlx(buffer_t, results, r_signal, w_signal_t, fb_signal);
+                break;
+            case 1:
+                // cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                cpu_buffer_reader_propagation_hierarchy_rlx(buffer_b, results, r_signal, w_signal_b, fb_signal);
+                break;
+            case 2:
+                // cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                cpu_buffer_reader_propagation_hierarchy_rlx(buffer_d, results, r_signal, w_signal_d, fb_signal);
+                break;
+            case 3:
+                // cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                cpu_buffer_reader_propagation_hierarchy_rlx(buffer_s, results, r_signal, w_signal_s, fb_signal);
+                break;
+            case 4:
+                // cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                cpu_buffer_reader_propagation_hierarchy_acq(buffer_t, results, r_signal, w_signal_t, fb_signal);
+                break;
+            case 5:
+                // cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                cpu_buffer_reader_propagation_hierarchy_acq(buffer_b, results, r_signal, w_signal_b, fb_signal);
+                break;
+            case 6:
+                // cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                cpu_buffer_reader_propagation_hierarchy_acq(buffer_d, results, r_signal, w_signal_d, fb_signal);
+                break;
+            case 7:
+                // cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                cpu_buffer_reader_propagation_hierarchy_acq(buffer_s, results, r_signal, w_signal_s, fb_signal);
+                break;
+            default:
+                break;
         }
     }
 }
