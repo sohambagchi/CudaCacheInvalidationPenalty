@@ -3,6 +3,30 @@
 import matplotlib.pyplot as plt
 import sys
 import os
+import numpy as np
+from scipy import stats
+
+def analyze_numbers(numbers):
+    # print(numbers)
+    x = stats.mode(numbers, keepdims=True)[0][0]
+
+    if np.count_nonzero(numbers == x) < len(numbers) * 0.5:
+        x = np.median(numbers)
+        
+    large_numbers = [n for n in numbers if n >= 3 * x]
+    
+    # print(len(large_numbers))
+    if len(large_numbers) > 0:
+        large_ratios = [n / x for n in large_numbers]
+    else:
+        large_ratios = [0]
+    
+    try:
+        avg_ratio = np.mean(large_ratios)
+    except:
+        avg_ratio = 0
+    
+    return x, avg_ratio
 
 def main(filename):
     with open(filename, 'r') as f:
@@ -18,8 +42,15 @@ def main(filename):
         
         err_count = 0
         
+        buffer_footprint = 0
+        data_footprint = 0
+        
         for i, line in enumerate(numbers):
             # if '[CPU ITER' in line:
+            if 'Size of Buffer' in line:
+                buffer_footprint = buffer_footprint + int(line.split(' ')[-5].strip().replace('B', ''))
+            if 'Size of Data' in line:
+                data_footprint = data_footprint + int(line.split(' ')[-5].strip().replace('B', ''))
             if '[CPU-R]' in line or '[GPU-R]' in line:
                 try:
                     y1.append(int(line.split(' ')[6].strip()))
@@ -40,14 +71,22 @@ def main(filename):
 
     # print(numbers)
     
-    print(kernel_starts)
-    print(kernel_stops)
+    # print(kernel_starts)
+    # print(kernel_stops)
+
+    print(len(kernel_starts))
 
     # wider graph
     
     plt.figure(figsize=(20, 6))
 
     plt.plot(x, y1)
+    
+    avg, avg_slowdown = analyze_numbers(y1)
+    
+    print(avg)
+    # print(large_numbers)
+    # print(large_ratios)
     
     # plot y2 on the right side
     
@@ -72,9 +111,16 @@ def main(filename):
         
     plt.xlabel('Iteration')
     
-    plt.ylabel('Time (ns)')
+    ax2.set_ylabel('Sum')
+    # plt.set_ylabel('Time (ns)')
     
-    plt.title(filename)
+    # plt.ylabel('Time')
+    # ax2.set_ylabel('Time (ns)')
+    # ax1.set_ylabel('Time (ns)')
+    
+    plt.title(f"{filename}: reader footprint = {str(buffer_footprint/1024)}KB, data footprint = {str(data_footprint/1024)}KB | avg latency = {avg/8192:.2f} cycles | avg slowdown = {avg_slowdown:.2f}x")
+    
+    # plt.title(filename + ' - reader footprint: ' + str(buffer_footprint/1024) + 'KB' + ' - data footprint: ' + str(data_footprint/1024) + 'KB | avg latency = ' + str(avg) + " cycles | avg slowdown" + str(avg_slowdown:.2f) + 'cycles')
     
     # explort to png
     plt.show()
@@ -90,3 +136,4 @@ if __name__ == '__main__':
             print('Processing ' + file)
             main(file)
             print('Finished ' + file)
+            # quit()

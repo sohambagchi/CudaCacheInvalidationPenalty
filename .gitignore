@@ -1,0 +1,7 @@
+*.txt
+*.S
+*.out
+*.ncu-rep
+outputs/
+ncu_reports/
+.venv/
