@@ -1,5 +1,5 @@
-#include "cache_invalidation_testing_utils.cuh"
-#include "cache_invalidation_testing_propagation_hierarchy.cuh"
+// #include "cache_invalidation_testing_propagation_hierarchy.cu"
+#include "cache_invalidation_testing.cuh"
 
 int main(int argc, char* argv[]) {
 
@@ -66,10 +66,11 @@ int main(int argc, char* argv[]) {
                 }
             case 'p':
                 multi_producer = true;
+                break;
             default:
                 std::cout << "Error: Invalid argument" << std::endl;
                 return 0;
-           }
+           
         }
     }
 
