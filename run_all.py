@@ -56,17 +56,22 @@ def run_all():
                         
                     file_prefix += '_multiproducer'
                         
-                    start_time = time.time()
-                    with open(file_prefix + f"_{allocator}_{reader}_{writer}.txt", "w") as f:
-                        p = subprocess.Popen(command, stdout=f, stderr=subprocess.PIPE)
-                        while p.poll() is None:
-                            time.sleep(10)
-                            elapsed_time = time.time() - start_time
-                            if elapsed_time > 600:  # 10 minutes
-                                p.terminate()
-                                print(f"Terminated {command} due to timeout")
-                                break
-                        _, err = p.communicate()
+                    file_path = file_prefix + f"_{allocator}_{reader}_{writer}.txt"
+                    
+                    if not os.path.exists(file_path) or os.path.getsize(file_path) < 1024:
+                        start_time = time.time()
+                        with open(file_path, "w") as f:
+                            p = subprocess.Popen(command, stdout=f, stderr=subprocess.PIPE)
+                            while p.poll() is None:
+                                time.sleep(10)
+                                elapsed_time = time.time() - start_time
+                                if elapsed_time > 600:  # 10 minutes
+                                    p.terminate()
+                                    print(f"Terminated {command} due to timeout")
+                                    break
+                            _, err = p.communicate()
+                    else:
+                        print(f"Skipping {file_prefix}_{allocator}_{reader}_{writer}.txt")
                         
                     command = ["./" + file, "-m", allocator, "-r", reader, "-w", writer]
                     print("Running command: " + ' '.join(command))
@@ -84,17 +89,22 @@ def run_all():
                         
                     file_prefix += '_singleproducer'
                         
-                    start_time = time.time()
-                    with open(file_prefix + f"_{allocator}_{reader}_{writer}.txt", "w") as f:
-                        p = subprocess.Popen(command, stdout=f, stderr=subprocess.PIPE)
-                        while p.poll() is None:
-                            time.sleep(10)
-                            elapsed_time = time.time() - start_time
-                            if elapsed_time > 60:  # 10 minutes
-                                p.terminate()
-                                print(f"Terminated {file} due to timeout")
-                                break
-                        _, err = p.communicate()
+                    file_path = file_prefix + f"_{allocator}_{reader}_{writer}.txt"
+                    
+                    if not os.path.exists(file_path) or os.path.getsize(file_path) < 1024:
+                        start_time = time.time()
+                        with open(file_prefix + f"_{allocator}_{reader}_{writer}.txt", "w") as f:
+                            p = subprocess.Popen(command, stdout=f, stderr=subprocess.PIPE)
+                            while p.poll() is None:
+                                time.sleep(10)
+                                elapsed_time = time.time() - start_time
+                                if elapsed_time > 60:  # 10 minutes
+                                    p.terminate()
+                                    print(f"Terminated {command} due to timeout")
+                                    break
+                            _, err = p.communicate()
+                    else:
+                        print(f"Skipping {file_prefix}_{allocator}_{reader}_{writer}.txt")
 
             print("Finished " + file)
             
