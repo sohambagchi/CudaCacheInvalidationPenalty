@@ -71,7 +71,7 @@ def run_all():
                                     break
                             _, err = p.communicate()
                     else:
-                        print(f"Skipping {file_prefix}_{allocator}_{reader}_{writer}.txt")
+                        print(f"Skipping {command}, already exists")
                         
                     command = ["./" + file, "-m", allocator, "-r", reader, "-w", writer]
                     print("Running command: " + ' '.join(command))
@@ -104,7 +104,7 @@ def run_all():
                                     break
                             _, err = p.communicate()
                     else:
-                        print(f"Skipping {file_prefix}_{allocator}_{reader}_{writer}.txt")
+                        print(f"Skipping {command}, already exists")
 
             print("Finished " + file)
             
