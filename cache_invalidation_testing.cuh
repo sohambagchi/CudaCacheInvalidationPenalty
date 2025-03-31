@@ -17,6 +17,10 @@
 
 #define CPU_NUM_THREADS 32
 
+#define PAGE_SIZE 4096
+
+#define CONSUMERS_CACHE
+
 #ifdef P_H_FLAG_STORE_ORDER_REL
 #define P_H_FLAG_STORE_ORDER cuda::memory_order_release
 #elif defined(P_H_FLAG_STORE_ORDER_RLX)
@@ -75,56 +79,56 @@ typedef enum {
 typedef struct bufferElement {
     // DATA_SIZE data;
     cuda::atomic<DATA_SIZE, CUDA_THREAD_SCOPE> data;
-    char padding[4096 - sizeof(DATA_SIZE)];
+    char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement;
 
 typedef struct bufferElement_t {
     // DATA_SIZE data;
     cuda::atomic<DATA_SIZE, cuda::thread_scope_thread> data;
-    char padding[4096 - sizeof(DATA_SIZE)];
+    char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement_t;
 
 typedef struct bufferElement_b {
     // DATA_SIZE data;
     cuda::atomic<DATA_SIZE, cuda::thread_scope_block> data;
-    char padding[4096 - sizeof(DATA_SIZE)];
+    char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement_b;
 
 typedef struct bufferElement_d {
     // DATA_SIZE data;
     cuda::atomic<DATA_SIZE, cuda::thread_scope_thread> data;
-    char padding[4096 - sizeof(DATA_SIZE)];
+    char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement_d;
 
 typedef struct bufferElement_s {
     // DATA_SIZE data;
     cuda::atomic<DATA_SIZE, cuda::thread_scope_system> data;
-    char padding[4096 - sizeof(DATA_SIZE)];
+    char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement_s;
 
 typedef struct bufferElement_na {
     uint32_t data;
-    char padding[4096 - sizeof(uint32_t)];
+    char padding[PAGE_SIZE - sizeof(uint32_t)];
 } bufferElement_na;
 
 typedef struct flag_t {
     cuda::atomic<uint32_t, cuda::thread_scope_thread> flag;
-    char padding[4096 - sizeof(uint32_t)];
+    char padding[PAGE_SIZE - sizeof(uint32_t)];
 } flag_t;
 
 typedef struct flag_b {
     cuda::atomic<uint32_t, cuda::thread_scope_block> flag;
-    char padding[4096 - sizeof(uint32_t)];
+    char padding[PAGE_SIZE - sizeof(uint32_t)];
 } flag_b;
 
 typedef struct flag_d {
     cuda::atomic<uint32_t, cuda::thread_scope_device> flag;
-    char padding[4096 - sizeof(uint32_t)];
+    char padding[PAGE_SIZE - sizeof(uint32_t)];
 } flag_d;
 
 typedef struct flag_s {
     cuda::atomic<uint32_t, cuda::thread_scope_system> flag;
-    char padding[4096 - sizeof(uint32_t)];
+    char padding[PAGE_SIZE - sizeof(uint32_t)];
 } flag_s;
 
 /**
@@ -669,18 +673,103 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propaga
     results[tid].data = result;
 }
 
-
 template <typename B, typename W, typename R>
-__device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propagation_hierarchy_acq(B * buffer, bufferElement_na * results, R * r_signal, W *w_signal, flag_s * fallback_signal) {
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_reader_propagation_hierarchy_rlx(B *buffer, bufferElement_na *results, R * r_signal, flag_t * w_t_signal, flag_b * w_b_signal, flag_d * w_d_signal, flag_s * w_s_signal, flag_s * fallback_signal) {
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    uint init_flag = w_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_t = w_t_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_b = w_b_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_d = w_d_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_s = w_s_signal->flag.load(cuda::memory_order_relaxed);
 
     uint result = 0;
+
+    #ifdef CONSUMERS_CACHE
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    #endif
+
+    results[tid].data = result;
+
+    // Set Reader Signal
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+
+    result = 0;
+
+    while ((init_flag_t = w_t_signal->flag.load(cuda::memory_order_relaxed) == 0) && (init_flag_b = w_b_signal->flag.load(cuda::memory_order_relaxed) == 0) && (init_flag_d = w_d_signal->flag.load(cuda::memory_order_relaxed) == 0) && (init_flag_s = w_s_signal->flag.load(cuda::memory_order_relaxed) == 0) && fallback_signal->flag.load(cuda::memory_order_relaxed) < 3) {
+        // Wait for Writer Signal
+    }
 
     for (int i = 0; i < BUFFER_SIZE; i++) {
         result += buffer[i].data.load(cuda::memory_order_relaxed);
     }
+
+    results[tid].data = result + init_flag_t * 1000000000 + init_flag_b * 100000000 + init_flag_d * 10000000 + init_flag_s * 1000000;
+
+    printf("B[%d] T[%d] (%d:%d:%d) Result %d\n", blockIdx.x, threadIdx.x, threadIdx.x / 32, threadIdx.x % 8, threadIdx.x % 4);
+
+    // cudaSleep(10000000000);
+
+    // printf("B[%d] T[%d] (%d:%d:%d) Done\n", blockIdx.x, threadIdx.x, threadIdx.x / 32, threadIdx.x % 8, threadIdx.x % 4);
+}
+
+template <typename B, typename W, typename R>
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_reader_propagation_hierarchy_acq(B *buffer, bufferElement_na * results, R * r_signal, flag_t * w_t_signal, flag_b * w_b_signal, flag_d * w_d_signal, flag_s * w_s_signal, flag_s * fallback_signal) {
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    uint init_flag_t = w_t_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_b = w_b_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_d = w_d_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_s = w_s_signal->flag.load(cuda::memory_order_relaxed);
+
+    uint result = 0;
+
+    #ifdef CONSUMERS_CACHE
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    #endif
+
+    results[tid].data = result;
+
+    // Set Reader Signal
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+
+    result = 0;
+
+    while ((init_flag_t = w_t_signal->flag.load(cuda::memory_order_acquire) == 0) && (init_flag_b = w_b_signal->flag.load(cuda::memory_order_acquire) == 0) && (init_flag_d = w_d_signal->flag.load(cuda::memory_order_acquire) == 0) && (init_flag_s = w_s_signal->flag.load(cuda::memory_order_acquire) == 0) && fallback_signal->flag.load(cuda::memory_order_relaxed) < 3) {
+        // Wait for Writer Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    results[tid].data = result + init_flag_t * 1000000000 + init_flag_b * 100000000 + init_flag_d * 10000000 + init_flag_s * 1000000;
+
+    printf("B[%d] T[%d] (%d:%d:%d) Result %d\n", blockIdx.x, threadIdx.x, threadIdx.x / 32, threadIdx.x % 8, threadIdx.x % 4);
+
+    // cudaSleep(10000000000);
+
+    // printf("B[%d] T[%d] (%d:%d:%d) Done\n", blockIdx.x, threadIdx.x, threadIdx.x / 32, threadIdx.x % 8, threadIdx.x % 4);
+}
+
+template <typename B, typename W, typename R>
+__device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propagation_hierarchy_acq(B * buffer, bufferElement_na * results, R * r_signal, W *w_signal, flag_s * fallback_signal) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    uint result = 0;
+
+    #ifdef CONSUMERS_CACHE
+    uint init_flag = w_signal->flag.load(cuda::memory_order_relaxed);
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    #endif
 
     results[tid].data = result;
 
@@ -709,15 +798,18 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propaga
 template <typename B, typename W, typename R>
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propagation_hierarchy_rlx(B *buffer, bufferElement_na *results, R *r_signal, W *w_signal, flag_s *fallback_signal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    
+    uint result = 0;
+
+    #ifdef CONSUMERS_CACHE
     uint init_flag = w_signal->flag.load(cuda::memory_order_relaxed);
 
-    uint result = 0;
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         result += buffer[i].data.load(cuda::memory_order_relaxed);
     }
+    #endif
     
+    // w_signal->flag.store(, cuda::memory_order_relaxed);
     results[tid].data = result;
     
     // Set Reader Signal
@@ -763,7 +855,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     }
 
     // Set Writer Signals (Thread)
-    w_t_signal->flag.store(1, cuda::memory_order_release);
+    w_t_signal->flag.store(1, P_H_FLAG_STORE_ORDER);
     
     cudaSleep(10000000000);
     
@@ -772,7 +864,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     }
     
     // Set Writer Signals (Block)
-    w_b_signal->flag.store(1, cuda::memory_order_release);
+    w_b_signal->flag.store(1, P_H_FLAG_STORE_ORDER);
     
     cudaSleep(10000000000);
     
@@ -781,7 +873,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     }
 
     // Set Writer Signals (Device)
-    w_d_signal->flag.store(1, cuda::memory_order_release);
+    w_d_signal->flag.store(1, P_H_FLAG_STORE_ORDER);
     
     cudaSleep(10000000000);
     
@@ -791,7 +883,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     
     // Set Writer Signals (System)
 
-    w_s_signal->flag.store(1, cuda::memory_order_release);
+    w_s_signal->flag.store(1, P_H_FLAG_STORE_ORDER);
     
     cudaSleep(10000000000);
     
@@ -801,7 +893,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
 
     cudaSleep(10000000000);
     
-    fallback_signal->flag.store(4, cuda::memory_order_release);
+    // fallback_signal->flag.store(4, cuda::memory_order_release);
 
     // cudaSleep(10000000000);
 
@@ -828,7 +920,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     }
 
     // Set Writer Signals (Thread)
-    w_t_signal->flag.store(1, cuda::memory_order_release);
+    w_t_signal->flag.store(1, P_H_FLAG_STORE_ORDER);
 
     cudaSleep(10000000000);
 
@@ -837,7 +929,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     }
 
     // Set Writer Signals (Block)
-    w_b_signal->flag.store(1, cuda::memory_order_release);
+    w_b_signal->flag.store(1, P_H_FLAG_STORE_ORDER);
 
     cudaSleep(10000000000);
 
@@ -846,7 +938,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     }
 
     // Set Writer Signals (Device)
-    w_d_signal->flag.store(1, cuda::memory_order_release);
+    w_d_signal->flag.store(1, P_H_FLAG_STORE_ORDER);
 
     cudaSleep(10000000000);
 
@@ -855,7 +947,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     }
 
     // Set Writer Signals (System)
-    w_s_signal->flag.store(1, cuda::memory_order_release);
+    w_s_signal->flag.store(1, P_H_FLAG_STORE_ORDER);
 
     cudaSleep(10000000000);
 
@@ -872,6 +964,8 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     // printf("[GPU] Het-Writer Done\n");
 }
 
+
+// TODO: GPU Spawner
 __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_writer_propagation_hierarchy(bufferElement *buffer, bufferElement *w_buffer, bufferElement_na * results, flag_d *r_signal, flag_t *w_t_signal, flag_b *w_b_signal, flag_d *w_d_signal, flag_s *w_s_signal, flag_s *fallback_signal, WriterType *spawn_writer) {
     int blockId = blockIdx.x;
     int threadId = threadIdx.x;
@@ -886,17 +980,17 @@ __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_writer_
         }
     } else if (blockId == 0) {
         if (threadId % 8 == 0) {
-            // gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-            gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_t_signal, fallback_signal);
+            gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+            // gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_t_signal, fallback_signal);
         } else if (threadId % 8 == 1) {
-            // gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-            gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_b_signal, fallback_signal);
+            gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+            // gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_b_signal, fallback_signal);
         } else if (threadId % 8 == 2) {
-            // gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-            gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_d_signal, fallback_signal);
+            gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+            // gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_d_signal, fallback_signal);
         } else if (threadId % 8 == 3) {
-            // gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-            gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_s_signal, fallback_signal);
+            gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+            // gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_s_signal, fallback_signal);
         } else if (threadId % 8 == 4) {
             #ifdef NO_ACQ
             gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
@@ -927,79 +1021,77 @@ __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_writer_
             gpu_dummy_writer_worker_propagation(w_buffer, r_signal);
         } else if (threadId < 32) {
             if (threadId % 8 == 0) {
-                gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_t_signal, fallback_signal);
-                // if (blockId == 99) {
-                //     gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_t_signal, fallback_signal);
-                // } else {
-                //     gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                // }
+                // gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_t_signal, fallback_signal);
+                if (blockId == 6) {
+                    gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_t_signal, fallback_signal);
+                } else {
+                    gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                }
             } else if (threadId % 8 == 1) {
-                gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_b_signal, fallback_signal);
-                // if (blockId == 99) {
-                //     gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_b_signal, fallback_signal);
-                // } else {
-                //     gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                // }
+                // gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_b_signal, fallback_signal);
+                if (blockId == 99) {
+                    gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_b_signal, fallback_signal);
+                } else {
+                    gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                }
             } else if (threadId % 8 == 2) {
-                gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_d_signal, fallback_signal);
-                // if (blockId == 99) {
-                //     gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_d_signal, fallback_signal);
-                // } else {
-                //     gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                // }
+                // gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_d_signal, fallback_signal);
+                if (blockId == 99) {
+                    gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_d_signal, fallback_signal);
+                } else {
+                    gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                }
             } else if (threadId % 8 == 3) {
-                gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_s_signal, fallback_signal);
-                // if (blockId == 99) {
-                //     gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_s_signal, fallback_signal);
-                // } else {
-                //     gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                // }
+                // gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_s_signal, fallback_signal);
+                if (blockId == 99) {
+                    gpu_buffer_reader_propagation_hierarchy_rlx(buffer, results, r_signal, w_s_signal, fallback_signal);
+                } else {
+                    gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                }
             } else if (threadId % 8 == 4) {
-                // if (blockId == 99) {
-                //     gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_t_signal, fallback_signal);
-                // } else {
-                //     gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                // }
-                #ifdef NO_ACQ
-                gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                #else
-                gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_t_signal, fallback_signal);
-                #endif
+                if (blockId == 99) {
+                    gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_t_signal, fallback_signal);
+                } else {
+                    gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                }
+                // #ifdef NO_ACQ
+                // gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                // #else
+                // gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_t_signal, fallback_signal);
+                // #endif
             } else if (threadId % 8 == 5) {
-                // if (blockId == 99) {
-                //     gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_b_signal, fallback_signal);
-                // } else {
-                //     gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                // }
-                
-                #ifdef NO_ACQ
-                gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                #else
-                gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_b_signal, fallback_signal);
-                #endif
+                if (blockId == 99) {
+                    gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_b_signal, fallback_signal);
+                } else {
+                    gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                }
+                // #ifdef NO_ACQ
+                // gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                // #else
+                // gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_b_signal, fallback_signal);
+                // #endif
             } else if (threadId % 8 == 6) {
-                // if (blockId == 99) {
-                //     gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_d_signal, fallback_signal);
-                // } else {
-                //     gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                // }
-                #ifdef NO_ACQ
-                gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                #else
-                gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_d_signal, fallback_signal);
-                #endif
+                if (blockId == 99) {
+                    gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_d_signal, fallback_signal);
+                } else {
+                    gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                }
+                // #ifdef NO_ACQ
+                // gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                // #else
+                // gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_d_signal, fallback_signal);
+                // #endif
             } else if (threadId % 8 == 7) {
-                // if (blockId == 99) {
-                //     gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_s_signal, fallback_signal);
-                // } else {
-                //     gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                // }
-
-                #ifdef NO_ACQ
-                gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
-                #else
-                gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_s_signal, fallback_signal);
-                #endif
+                if (blockId == 99) {
+                    gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_s_signal, fallback_signal);
+                } else {
+                    gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                }
+                // #ifdef NO_ACQ
+                // gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
+                // #else
+                // gpu_buffer_reader_propagation_hierarchy_acq(buffer, results, r_signal, w_s_signal, fallback_signal);
+                // #endif
             }
         } else {
             gpu_dummy_reader_worker_propagation(w_buffer, results, r_signal);
@@ -1115,6 +1207,80 @@ static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierar
 }
 
 template <typename B, typename R, typename W, typename F>
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_reader_propagation_hierarchy_rlx(B *buffer, bufferElement_na * results, R *r_signal, flag_t * w_t_signal, flag_b * w_b_signal, flag_d * w_d_signal, flag_s * w_s_signal, F * fallback_signal) {
+    
+    int core_id = sched_getcpu();
+
+    uint init_flag_t = w_t_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_b = w_b_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_d = w_d_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_s = w_s_signal->flag.load(cuda::memory_order_relaxed);
+
+    uint result = 0;
+
+    #ifdef CONSUMERS_CACHE
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    #endif
+
+    results[core_id].data = result;
+
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+
+    result = 0;
+
+    while ((init_flag_t = w_t_signal->flag.load(cuda::memory_order_relaxed) == 0) && (init_flag_b = w_b_signal->flag.load(cuda::memory_order_relaxed) == 0) && (init_flag_d = w_d_signal->flag.load(cuda::memory_order_relaxed) == 0) && (init_flag_s = w_s_signal->flag.load(cuda::memory_order_relaxed) == 0) && fallback_signal->flag.load(cuda::memory_order_relaxed) < 3) {
+        // Wait for Writer Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    results[core_id % CPU_NUM_THREADS].data = result + init_flag_t * 1000000000 + init_flag_b * 100000000 + init_flag_d * 10000000 + init_flag_s * 1000000;
+
+    printf("C[%d:%d:%d] Result %d\n", core_id, core_id % 8, core_id % 4, results[core_id % CPU_NUM_THREADS].data);
+}
+
+template <typename B, typename R, typename W, typename F>
+static void __attribute__((optimize("O0"))) cpu_buffer_multi_reader_propagation_hierarchy_acq(B *buffer, bufferElement_na * results, R *r_signal, flag_t * w_t_signal, flag_b * w_b_signal, flag_d * w_d_signal, flag_s * w_s_signal, F * fallback_signal) {
+    
+    int core_id = sched_getcpu();
+
+    uint init_flag_t = w_t_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_b = w_b_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_d = w_d_signal->flag.load(cuda::memory_order_relaxed);
+    uint init_flag_s = w_s_signal->flag.load(cuda::memory_order_relaxed);
+
+    uint result = 0;
+
+    #ifdef CONSUMERS_CACHE
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    #endif
+
+    results[core_id].data = result;
+
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+
+    result = 0;
+
+    while ((init_flag_t = w_t_signal->flag.load(cuda::memory_order_acquire) == 0) && (init_flag_b = w_b_signal->flag.load(cuda::memory_order_acquire) == 0) && (init_flag_d = w_d_signal->flag.load(cuda::memory_order_acquire) == 0) && (init_flag_s = w_s_signal->flag.load(cuda::memory_order_acquire) == 0) && fallback_signal->flag.load(cuda::memory_order_relaxed) < 3) {
+        // Wait for Writer Signal
+    }
+
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    results[core_id % CPU_NUM_THREADS].data = result + init_flag_t * 1000000000 + init_flag_b * 100000000 + init_flag_d * 10000000 + init_flag_s * 1000000;
+
+    printf("C[%d:%d:%d] Result %d\n", core_id, core_id % 8, core_id % 4, results[core_id % CPU_NUM_THREADS].data);
+}
+
+template <typename B, typename R, typename W, typename F>
 static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierarchy_rlx(B *buffer, bufferElement_na * results, R *r_signal, W *w_signal, F *fallback_signal) {
     
     int core_id = sched_getcpu();
@@ -1123,9 +1289,11 @@ static void __attribute__((optimize("O0"))) cpu_buffer_reader_propagation_hierar
 
     uint result = 0;
 
+    #ifdef CONSUMERS_CACHE
     for (int i = 0; i < BUFFER_SIZE; i++) {
         result += buffer[i].data.load(cuda::memory_order_relaxed);
     }
+    #endif
 
     results[core_id].data = result;
 
@@ -1547,6 +1715,7 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_s
     // printf("GPU System Writer Done\n");
 }
 
+// TODO: GPU Spawner
 __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_multi_writer_propagation_hierarchy(bufferElement * dummy_buffer, bufferElement_t * buffer_t, bufferElement_b * buffer_b, bufferElement_d * buffer_d, bufferElement_s * buffer_s, bufferElement_na * results, flag_d * r_signal, flag_t * w_signal_t, flag_b * w_signal_b, flag_d * w_signal_d, flag_s * w_signal_s,  flag_s * fb_signal, WriterType *spawn_writer) {
     int tid = threadIdx.x;
     int bid = blockIdx.x;
@@ -1590,77 +1759,76 @@ __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_multi_w
     } else {
         switch (global_tid % 8) {
             case 0:
-                gpu_buffer_reader_propagation_hierarchy_rlx(buffer_t, results, r_signal, w_signal_t, fb_signal);
-                // if (bid == 99)
-                //     gpu_buffer_reader_propagation_hierarchy_rlx(buffer_t, results, r_signal, w_signal_t, fb_signal);
-                // else 
-                //     gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // gpu_buffer_reader_propagation_hierarchy_rlx(buffer_t, results, r_signal, w_signal_t, fb_signal);
+                if (bid == 5)
+                    gpu_buffer_reader_propagation_hierarchy_rlx(buffer_t, results, r_signal, w_signal_t, fb_signal);
+                else 
+                    gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
                 break;
             case 1:
-                gpu_buffer_reader_propagation_hierarchy_rlx(buffer_b, results, r_signal, w_signal_b, fb_signal);
-                // if (bid == 99)
-                //     gpu_buffer_reader_propagation_hierarchy_rlx(buffer_b, results, r_signal, w_signal_b, fb_signal);
-                // else 
-                //     gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // gpu_buffer_reader_propagation_hierarchy_rlx(buffer_b, results, r_signal, w_signal_b, fb_signal);
+                if (bid == 99)
+                    gpu_buffer_reader_propagation_hierarchy_rlx(buffer_b, results, r_signal, w_signal_b, fb_signal);
+                else 
+                    gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
                 break;
             case 2:
-                gpu_buffer_reader_propagation_hierarchy_rlx(buffer_d, results, r_signal, w_signal_d, fb_signal);
-                // if (bid == 4)
-                //     gpu_buffer_reader_propagation_hierarchy_rlx(buffer_d, results, r_signal, w_signal_d, fb_signal);
-                // else 
-                //     gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // gpu_buffer_reader_propagation_hierarchy_rlx(buffer_d, results, r_signal, w_signal_d, fb_signal);
+                if (bid == 99)
+                    gpu_buffer_reader_propagation_hierarchy_rlx(buffer_d, results, r_signal, w_signal_d, fb_signal);
+                else 
+                    gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
                 break;
             case 3:
-                gpu_buffer_reader_propagation_hierarchy_rlx(buffer_s, results, r_signal, w_signal_s, fb_signal);
-                // if (bid == 99)
-                //     gpu_buffer_reader_propagation_hierarchy_rlx(buffer_s, results, r_signal, w_signal_s, fb_signal);
-                // else
-                //     gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // gpu_buffer_reader_propagation_hierarchy_rlx(buffer_s, results, r_signal, w_signal_s, fb_signal);
+                if (bid == 99)
+                    gpu_buffer_reader_propagation_hierarchy_rlx(buffer_s, results, r_signal, w_signal_s, fb_signal);
+                else
+                    gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
                 break;
             case 4:
-                // if (bid == 5)
-                //     gpu_buffer_reader_propagation_hierarchy_acq(buffer_t, results, r_signal, w_signal_t, fb_signal);
-                // else
-                //     gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
-                #ifdef NO_ACQ
-                gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
-                #else
-                gpu_buffer_reader_propagation_hierarchy_acq(buffer_t, results, r_signal, w_signal_t, fb_signal);
-                #endif
+                if (bid == 99)
+                    gpu_buffer_reader_propagation_hierarchy_acq(buffer_t, results, r_signal, w_signal_t, fb_signal);
+                else
+                    gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // #ifdef NO_ACQ
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // #else
+                // gpu_buffer_reader_propagation_hierarchy_acq(buffer_t, results, r_signal, w_signal_t, fb_signal);
+                // #endif
                 break;
             case 5:
-                // if (bid == 99)
-                //     gpu_buffer_reader_propagation_hierarchy_acq(buffer_b, results, r_signal, w_signal_b, fb_signal);
-                // else
-                //     gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
-                #ifdef NO_ACQ
-                gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
-                #else
-                gpu_buffer_reader_propagation_hierarchy_acq(buffer_b, results, r_signal, w_signal_b, fb_signal);
-                #endif
+                if (bid == 99)
+                    gpu_buffer_reader_propagation_hierarchy_acq(buffer_b, results, r_signal, w_signal_b, fb_signal);
+                else
+                    gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // #ifdef NO_ACQ
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // #else
+                // gpu_buffer_reader_propagation_hierarchy_acq(buffer_b, results, r_signal, w_signal_b, fb_signal);
+                // #endif
                 break;
             case 6:
-                // if (bid == 99)
-                //     gpu_buffer_reader_propagation_hierarchy_acq(buffer_d, results, r_signal, w_signal_d, fb_signal);
-                // else
-                //     gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);    
-            
-                #ifdef NO_ACQ
-                gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
-                #else
-                gpu_buffer_reader_propagation_hierarchy_acq(buffer_d, results, r_signal, w_signal_d, fb_signal);
-                #endif
+                if (bid == 99)
+                    gpu_buffer_reader_propagation_hierarchy_acq(buffer_d, results, r_signal, w_signal_d, fb_signal);
+                else
+                    gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);    
+                // #ifdef NO_ACQ
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // #else
+                // gpu_buffer_reader_propagation_hierarchy_acq(buffer_d, results, r_signal, w_signal_d, fb_signal);
+                // #endif
                 break;
             case 7:
-                // if (bid == 99)
-                //     gpu_buffer_reader_propagation_hierarchy_acq(buffer_s, results, r_signal, w_signal_s, fb_signal);
-                // else
-                //     gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
-                #ifdef NO_ACQ
-                gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
-                #else
-                gpu_buffer_reader_propagation_hierarchy_acq(buffer_s, results, r_signal, w_signal_s, fb_signal);
-                #endif
+                if (bid == 99)
+                    gpu_buffer_reader_propagation_hierarchy_acq(buffer_s, results, r_signal, w_signal_s, fb_signal);
+                else
+                    gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // #ifdef NO_ACQ
+                // gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+                // #else
+                // gpu_buffer_reader_propagation_hierarchy_acq(buffer_s, results, r_signal, w_signal_s, fb_signal);
+                // #endif
                 break;
             default:
                 break;

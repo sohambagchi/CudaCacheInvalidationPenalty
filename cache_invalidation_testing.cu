@@ -789,7 +789,11 @@ int main(int argc, char* argv[]) {
                     std::cout << "-Acq ";
                 }
                 
-                std::cout << result_c[i].data << std::endl;
+                if (result_c[i].data > 2000000000) {
+                    std::cout << "--" << std::endl;
+                } else {
+                    std::cout << result_c[i].data << std::endl;
+                }
             }
         } else {
             std::cout << "[INFO] Spawning Heterogeneous Reader and Writer" << std::endl;
@@ -872,7 +876,11 @@ int main(int argc, char* argv[]) {
                     std::cout << "-Acq ";
                 }
 
-                std::cout << result_c[i].data << std::endl;
+                if (result_c[i].data > 2000000000) {
+                    std::cout << "--" << std::endl;
+                } else {
+                    std::cout << result_c[i].data << std::endl;
+                }
             }
 
             free(result_g_h);
