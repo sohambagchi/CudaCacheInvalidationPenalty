@@ -1,3 +1,27 @@
+/**
+ * @file cache_invalidation_testing.cuh
+ * @brief CUDA Cache Invalidation Penalty Testing Framework
+ * 
+ * Tests cache coherence propagation delays across heterogeneous CPU-GPU systems.
+ * Measures how memory ordering semantics (acquire/release/relaxed) and CUDA thread
+ * scopes (thread/block/device/system) affect cache invalidation propagation.
+ * 
+ * MAIN EXECUTION PATTERNS:
+ * 1. Single Writer Propagation Hierarchy - One writer, multiple readers test
+ *    visibility across scope levels (thread → block → device → system)
+ * 2. Multi-Writer Propagation Hierarchy - Four concurrent writers test
+ *    concurrent visibility at different scope levels
+ * 
+ * TIMING INSTRUMENTATION:
+ * - GPU functions: Use cudaEvent or clock64() for per-thread timing
+ * - CPU functions: Use std::chrono::high_resolution_clock
+ * - Target consumer functions marked with "TIMING POINT" in documentation
+ * 
+ * See REFERENCE.md for complete documentation of all functions and data structures.
+ * 
+ * @author Soham Bagchi
+ */
+
 #include <cuda/atomic>
 #include <iostream>
 #include <chrono>
@@ -55,61 +79,96 @@ typedef uint8_t DATA_SIZE;
 #define CUDA_THREAD_SCOPE cuda::thread_scope_system
 #endif
 
+/**
+ * @brief Memory allocator selection
+ * 
+ * Determines where buffers are allocated in the memory hierarchy.
+ * Affects cache coherence behavior and propagation delays.
+ */
 typedef enum {
-    CE_SYS_MALLOC,
-    CE_CUDA_MALLOC,
-    CE_NUMA_HOST,
-    CE_NUMA_DEVICE,
-    CE_DRAM,
-    CE_UM
+    CE_SYS_MALLOC,    ///< System malloc() - standard host memory
+    CE_CUDA_MALLOC,   ///< cudaMalloc() - GPU device memory (GPU-only)
+    CE_NUMA_HOST,     ///< NUMA node 0 - CPU-local memory
+    CE_NUMA_DEVICE,   ///< NUMA node 1 - GPU-local memory
+    CE_DRAM,          ///< cudaMallocHost() - pinned host memory
+    CE_UM             ///< cudaMallocManaged() - unified memory
 } AllocatorType;
 
+/**
+ * @brief Consumer type selection
+ * 
+ * Determines whether GPU or CPU threads act as readers/writers.
+ */
 typedef enum {
-    CE_GPU,
-    CE_CPU
+    CE_GPU,           ///< GPU threads as consumer
+    CE_CPU            ///< CPU threads as consumer
 } ReaderWriterType;
 
+/**
+ * @brief Writer spawn control
+ * 
+ * Controls which device spawns the writer thread in propagation tests.
+ */
 typedef enum {
-    CE_NO_WRITER,
-    CE_WRITER,
-    CE_HET_WRITER,
-    CE_MULTI_WRITER
+    CE_NO_WRITER,     ///< No writer spawned (reader-only mode)
+    CE_WRITER,        ///< Single writer (homogeneous, same device as readers)
+    CE_HET_WRITER,    ///< Heterogeneous writer (cross-device)
+    CE_MULTI_WRITER   ///< Multiple concurrent writers (multi-producer mode)
 } WriterType;
 
+/**
+ * @brief Buffer element with page-aligned padding
+ * 
+ * Each element padded to PAGE_SIZE (4KB) to prevent false sharing
+ * and isolate cache line effects. Atomic operations use compile-time
+ * CUDA_THREAD_SCOPE.
+ */
 typedef struct bufferElement {
     // DATA_SIZE data;
     cuda::atomic<DATA_SIZE, CUDA_THREAD_SCOPE> data;
     char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement;
 
+/** @brief Buffer element with thread scope atomics - for multi-writer tests */
 typedef struct bufferElement_t {
-    // DATA_SIZE data;
     cuda::atomic<DATA_SIZE, cuda::thread_scope_thread> data;
     char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement_t;
 
+/** @brief Buffer element with block scope atomics - for multi-writer tests */
 typedef struct bufferElement_b {
-    // DATA_SIZE data;
     cuda::atomic<DATA_SIZE, cuda::thread_scope_block> data;
     char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement_b;
 
+/** @brief Buffer element with device scope atomics - for multi-writer tests */
 typedef struct bufferElement_d {
-    // DATA_SIZE data;
-    cuda::atomic<DATA_SIZE, cuda::thread_scope_thread> data;
+    cuda::atomic<DATA_SIZE, cuda::thread_scope_device> data;
     char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement_d;
 
+/** @brief Buffer element with system scope atomics - for multi-writer tests */
 typedef struct bufferElement_s {
-    // DATA_SIZE data;
     cuda::atomic<DATA_SIZE, cuda::thread_scope_system> data;
     char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement_s;
 
+/** @brief Non-atomic buffer element - for result storage */
 typedef struct bufferElement_na {
     uint32_t data;
     char padding[PAGE_SIZE - sizeof(uint32_t)];
 } bufferElement_na;
+
+/**
+ * @brief Synchronization flags with page-aligned padding
+ * 
+ * Flags signal readiness between readers and writers.
+ * - r_signal: Reader readiness counter (incremented by each reader)
+ * - w_signal: Writer completion flag (set to 1 when data ready)
+ * - fallback_signal: Timeout mechanism to prevent infinite waits
+ * 
+ * Scope variants (_t/_b/_d/_s) match corresponding buffer types.
+ */
 
 typedef struct flag_t {
     cuda::atomic<uint32_t, cuda::thread_scope_thread> flag;
@@ -162,6 +221,11 @@ typedef struct flag_s {
  }
  
 
+/**
+ * @brief Query GPU device properties and return clock rate
+ * @return GPU clock rate in KHz
+ * @note Other device properties are queried but output is commented out
+ */
 int get_gpu_properties() {
     int device;
     cudaDeviceProp prop;
@@ -387,6 +451,13 @@ __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_writer(
     }
 }
 
+/**
+ * @brief Background GPU writer - no synchronization, just keeps GPU busy
+ * @param buffer Buffer to write to
+ * 
+ * NO TIMING NEEDED - This is background load only
+ * Used to create concurrent activity during propagation tests
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_dummy_writer_worker(bufferElement *buffer) {
     for (int i = 0; i < NUM_ITERATIONS; i++) {
         for (int j = 0; j < BUFFER_SIZE; j++) {
@@ -395,6 +466,14 @@ __device__ static void __attribute__((optimize("O0"))) gpu_dummy_writer_worker(b
     }
 }
 
+/**
+ * @brief Background GPU reader - no synchronization, just keeps GPU busy
+ * @param buffer Buffer to read from
+ * @param results Per-thread result storage
+ * 
+ * NO TIMING NEEDED - This is background load only
+ * Used to create concurrent activity during propagation tests
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_dummy_reader_worker(bufferElement *buffer, bufferElement_na *results) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -602,6 +681,15 @@ __device__ static void __attribute__((optimize("O0"))) gpu_dummy_reader_worker_p
 
 
 
+/**
+ * @brief GPU writer for propagation hierarchy testing (simple variant)
+ * @param buffer Buffer to write data to
+ * @param r_signal Reader readiness signal (waits for all readers)
+ * @param w_signal Writer completion signal (signals when done)
+ * 
+ * TIMING POINT: Time the write loop and flag store operation
+ * Writes value 1 to all buffer elements, then sets w_signal to 1
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propagation(bufferElement *buffer, flag_d *r_signal, flag_d *w_signal) {
 
     while(r_signal->flag.load(cuda::memory_order_acquire) != GPU_NUM_BLOCKS * GPU_NUM_THREADS - 1) {
@@ -618,6 +706,16 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     w_signal->flag.store(1, P_H_FLAG_STORE_ORDER);
 }
 
+/**
+ * @brief GPU reader with ACQUIRE semantics for propagation testing
+ * @param buffer Buffer to read from
+ * @param results Per-thread result storage
+ * @param r_signal Reader readiness counter (increments to signal ready)
+ * @param w_signal Writer completion flag (waits with memory_order_acquire)
+ * 
+ * TIMING POINT: Start when w_signal acquired (non-zero), end after buffer read
+ * Uses memory_order_acquire on flag load to ensure data visibility
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propagation_acq(bufferElement *buffer, bufferElement_na *results, flag_d *r_signal, flag_d *w_signal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -646,6 +744,16 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propaga
     results[tid].data = result;
 }
 
+/**
+ * @brief GPU reader with RELAXED semantics for propagation testing
+ * @param buffer Buffer to read from
+ * @param results Per-thread result storage
+ * @param r_signal Reader readiness counter
+ * @param w_signal Writer completion flag (waits with memory_order_relaxed)
+ * 
+ * TIMING POINT: Start when w_signal observed non-zero, end after buffer read
+ * Uses memory_order_relaxed on flag load - may observe stale buffer data
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propagation_rlx(bufferElement *buffer, bufferElement_na *results, flag_d *r_signal, flag_d *w_signal) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -836,6 +944,25 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_propaga
     // printf("B[%d] T[%d] (%d:%d:%d) Done\n", blockIdx.x, threadIdx.x, threadIdx.x / 32, threadIdx.x % 8, threadIdx.x % 4);
 }
 
+/**
+ * @brief GPU writer for propagation hierarchy testing (homogeneous GPU-only)
+ * @param buffer Main data buffer
+ * @param r_signal Reader readiness counter (waits for GPU_NUM_THREADS * GPU_NUM_BLOCKS - 1)
+ * @param w_t_signal Writer flag for thread scope
+ * @param w_b_signal Writer flag for block scope
+ * @param w_d_signal Writer flag for device scope
+ * @param w_s_signal Writer flag for system scope
+ * @param fallback_signal Timeout mechanism
+ * 
+ * TIMING POINTS: Time each phase separately:
+ *   Phase 1: Write 10 to buffer + set w_t_signal → cudaSleep(10000000000)
+ *   Phase 2: Write 20 to buffer + set w_b_signal → sleep
+ *   Phase 3: Write 30 to buffer + set w_d_signal → sleep
+ *   Phase 4: Write 40 to buffer + set w_s_signal → sleep
+ * 
+ * This is the MAIN WRITER for single-writer propagation hierarchy tests
+ * Flag store order controlled by P_H_FLAG_STORE_ORDER compile flag
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propagation_hierarchy(bufferElement *buffer, flag_d * r_signal, flag_t * w_t_signal, flag_b * w_b_signal, flag_d * w_d_signal, flag_s * w_s_signal, flag_s * fallback_signal) {
 
     printf("GPU Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
@@ -900,6 +1027,22 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
     // printf("[GPU] Writer Done\n");
 }
 
+/**
+ * @brief GPU writer for propagation hierarchy testing (heterogeneous CPU+GPU)
+ * @param buffer Main data buffer
+ * @param r_signal Reader readiness counter (waits for CPU_NUM_THREADS + GPU_NUM_THREADS - 1)
+ * @param w_t_signal Writer flag for thread scope
+ * @param w_b_signal Writer flag for block scope
+ * @param w_d_signal Writer flag for device scope
+ * @param w_s_signal Writer flag for system scope
+ * @param fallback_signal Timeout mechanism
+ * 
+ * TIMING POINTS: Same as gpu_buffer_writer_propagation_hierarchy
+ *   Four phases, each: write value to buffer + set scope flag + sleep
+ * 
+ * This writer expects both CPU and GPU readers
+ * Flag store order controlled by P_H_FLAG_STORE_ORDER compile flag
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propagation_hierarchy_cpu(bufferElement *buffer, flag_d *r_signal, flag_t *w_t_signal, flag_b *w_b_signal, flag_d *w_d_signal, flag_s *w_s_signal, flag_s *fallback_signal) {
     // int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -966,6 +1109,27 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_propaga
 
 
 // TODO: GPU Spawner
+/**
+ * @brief Orchestrator kernel for propagation hierarchy testing
+ * @param buffer Main data buffer
+ * @param w_buffer Writer buffer (for divergent execution)
+ * @param results Per-thread result storage
+ * @param r_signal Reader readiness counter
+ * @param w_t_signal Thread scope writer flag
+ * @param w_b_signal Block scope writer flag
+ * @param w_d_signal Device scope writer flag
+ * @param w_s_signal System scope writer flag
+ * @param fallback_signal Timeout mechanism
+ * @param spawn_writer Control flag (CE_WRITER, CE_HET_WRITER, CE_NO_WRITER)
+ * 
+ * Thread role assignment:
+ *   Block 0, Thread 0: Writer (if spawn_writer != CE_NO_WRITER)
+ *   Other threads: Readers based on threadIdx.x % 8:
+ *     0-3: Relaxed readers (thread/block/device/system scopes)
+ *     4-7: Acquire readers (or dummy readers if NO_ACQ defined)
+ * 
+ * NO TIMING NEEDED - Individual consumer functions handle their own timing
+ */
 __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_writer_propagation_hierarchy(bufferElement *buffer, bufferElement *w_buffer, bufferElement_na * results, flag_d *r_signal, flag_t *w_t_signal, flag_b *w_b_signal, flag_d *w_d_signal, flag_s *w_s_signal, flag_s *fallback_signal, WriterType *spawn_writer) {
     int blockId = blockIdx.x;
     int threadId = threadIdx.x;
@@ -1112,6 +1276,25 @@ __global__ static void __attribute__((optimize("O0"))) gpu_buffer_writer_single_
     }
 }
 
+/**
+ * @brief CPU writer for propagation hierarchy testing (homogeneous CPU-only)
+ * @param buffer Main data buffer
+ * @param r_signal Reader readiness counter (waits for CPU_NUM_THREADS - 1)
+ * @param w_t_signal Thread scope writer flag
+ * @param w_b_signal Block scope writer flag
+ * @param w_d_signal Device scope writer flag
+ * @param w_s_signal System scope writer flag
+ * @param fallback_signal Timeout mechanism
+ * 
+ * TIMING POINTS: Use std::chrono::high_resolution_clock for each phase:
+ *   Phase 1: Write 10 + set w_t_signal → sleep(5)
+ *   Phase 2: Write 20 + set w_b_signal → sleep(5)
+ *   Phase 3: Write 30 + set w_d_signal → sleep(5)
+ *   Phase 4: Write 40 + set w_s_signal → sleep(5)
+ * 
+ * This is the MAIN CPU WRITER for single-writer propagation hierarchy tests
+ * Uses sleep(5) = 5 seconds between phases
+ */
 static void __attribute__((optimize("O0"))) cpu_buffer_writer_propagation_hierarchy(bufferElement *buffer, flag_d *r_signal, flag_t *w_t_signal, flag_b *w_b_signal, flag_d *w_d_signal, flag_s *w_s_signal, flag_s *fallback_signal) {
     
     printf("CPU Writer %d\n", sched_getcpu());
@@ -1387,6 +1570,26 @@ static void __attribute__((optimize("O0"))) cpu_dummy_reader_worker_propagation(
     results[core_id % CPU_NUM_THREADS].data = result;
 }
 
+/**
+ * @brief CPU orchestrator function for propagation hierarchy testing
+ * @param buffer Main data buffer
+ * @param w_buffer Writer buffer (for divergent execution)
+ * @param results Per-thread result storage
+ * @param r_signal Reader readiness counter
+ * @param w_t_signal Thread scope writer flag
+ * @param w_b_signal Block scope writer flag
+ * @param w_d_signal Device scope writer flag
+ * @param w_s_signal System scope writer flag
+ * @param fallback_signal Timeout mechanism
+ * @param spawn_writer Control flag (CE_WRITER, CE_HET_WRITER, CE_NO_WRITER)
+ * 
+ * Thread role assignment based on core_id % 8:
+ *   Core 0: Writer (if spawn_writer != CE_NO_WRITER)
+ *   Cores 0-3 (mod 8): Relaxed readers (thread/block/device/system)
+ *   Cores 4-7 (mod 8): Acquire readers (or dummy if NO_ACQ)
+ * 
+ * NO TIMING NEEDED - Individual consumer functions handle their own timing
+ */
 static void __attribute__((optimize("O0"))) cpu_buffer_reader_writer_propagation_hierarchy(bufferElement *buffer, bufferElement *w_buffer, bufferElement_na * results, flag_d *r_signal, flag_t *w_t_signal, flag_b *w_b_signal, flag_d *w_d_signal, flag_s *w_s_signal, flag_s *fallback_signal, WriterType *spawn_writer) {
 
     
@@ -1575,6 +1778,17 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_s
 
     // printf("GPU System Het-Writer Done\n");
 }
+/**
+ * @brief GPU multi-writer for THREAD scope (homogeneous GPU-only)
+ * @param buffer Thread-scoped atomic buffer
+ * @param r_signal Reader readiness counter (waits for GPU_NUM_THREADS * GPU_NUM_BLOCKS - 4)
+ * @param w_signal Thread scope writer flag
+ * @param fb_signal Fallback timeout mechanism
+ * 
+ * TIMING POINT: Time write loop (value 10) + flag store → sleep → write (value 1)
+ * Part of multi-writer pattern with 4 concurrent writers
+ * Flag store uses P_H_FLAG_STORE_ORDER
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_thread_propagation_hierarchy(bufferElement_t * buffer, flag_d * r_signal, flag_t * w_signal, flag_s * fb_signal) {
 
     printf("GPU Thread Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
@@ -1610,6 +1824,16 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_t
     // printf("GPU Thread Writer Done\n");
 }
 
+/**
+ * @brief GPU multi-writer for BLOCK scope (homogeneous GPU-only)
+ * @param buffer Block-scoped atomic buffer
+ * @param r_signal Reader readiness counter (waits for GPU_NUM_THREADS * GPU_NUM_BLOCKS - 4)
+ * @param w_signal Block scope writer flag
+ * @param fb_signal Fallback timeout mechanism
+ * 
+ * TIMING POINT: Time write loop (value 20) + flag store → sleep → write (value 2)
+ * Part of multi-writer pattern with 4 concurrent writers
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_block_propagation_hierarchy(bufferElement_b * buffer, flag_d * r_signal, flag_b * w_signal, flag_s * fb_signal) {
 
     printf("GPU Block Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
@@ -1645,6 +1869,16 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_b
     // printf("GPU Block Writer Done\n");
 }
 
+/**
+ * @brief GPU multi-writer for DEVICE scope (homogeneous GPU-only)
+ * @param buffer Device-scoped atomic buffer
+ * @param r_signal Reader readiness counter (waits for GPU_NUM_THREADS * GPU_NUM_BLOCKS - 4)
+ * @param w_signal Device scope writer flag
+ * @param fb_signal Fallback timeout mechanism
+ * 
+ * TIMING POINT: Time write loop (value 30) + flag store → sleep → write (value 3)
+ * Part of multi-writer pattern with 4 concurrent writers
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_device_propagation_hierarchy(bufferElement_d * buffer, flag_d * r_signal, flag_d * w_signal, flag_s * fb_signal) {
 
     printf("GPU Device Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
@@ -1680,6 +1914,16 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_d
     // printf("GPU Device Writer Done\n");
 }
 
+/**
+ * @brief GPU multi-writer for SYSTEM scope (homogeneous GPU-only)
+ * @param buffer System-scoped atomic buffer
+ * @param r_signal Reader readiness counter (waits for GPU_NUM_THREADS * GPU_NUM_BLOCKS - 4)
+ * @param w_signal System scope writer flag
+ * @param fb_signal Fallback timeout mechanism
+ * 
+ * TIMING POINT: Time write loop (value 40) + flag store → sleep → write (value 4)
+ * Part of multi-writer pattern with 4 concurrent writers
+ */
 __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_system_propagation_hierarchy(bufferElement_s * buffer, flag_d * r_signal, flag_s * w_signal, flag_s * fb_signal) {
 
     printf("GPU System Writer %d\n", blockIdx.x * blockDim.x + threadIdx.x);
@@ -1716,6 +1960,28 @@ __device__ static void __attribute__((optimize("O0"))) gpu_buffer_multi_writer_s
 }
 
 // TODO: GPU Spawner
+/**
+ * @brief Orchestrator kernel for multi-writer propagation hierarchy testing
+ * @param dummy_buffer Background load buffer
+ * @param buffer_t Thread-scoped atomic buffer
+ * @param buffer_b Block-scoped atomic buffer
+ * @param buffer_d Device-scoped atomic buffer
+ * @param buffer_s System-scoped atomic buffer
+ * @param results Per-thread result storage
+ * @param r_signal Reader readiness counter
+ * @param w_signal_t Thread scope writer flag
+ * @param w_signal_b Block scope writer flag
+ * @param w_signal_d Device scope writer flag
+ * @param w_signal_s System scope writer flag
+ * @param fb_signal Fallback timeout mechanism
+ * @param spawn_writer Control flag (CE_WRITER, CE_HET_WRITER, CE_NO_WRITER)
+ * 
+ * Thread role assignment:
+ *   Blocks 0-3, Thread 0: Four writers (one per scope level)
+ *   Other threads: Readers based on global_tid % 8
+ * 
+ * NO TIMING NEEDED - Individual consumer functions handle their own timing
+ */
 __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_multi_writer_propagation_hierarchy(bufferElement * dummy_buffer, bufferElement_t * buffer_t, bufferElement_b * buffer_b, bufferElement_d * buffer_d, bufferElement_s * buffer_s, bufferElement_na * results, flag_d * r_signal, flag_t * w_signal_t, flag_b * w_signal_b, flag_d * w_signal_d, flag_s * w_signal_s,  flag_s * fb_signal, WriterType *spawn_writer) {
     int tid = threadIdx.x;
     int bid = blockIdx.x;
@@ -1836,6 +2102,16 @@ __global__ static void __attribute__((optimize("O0"))) gpu_buffer_reader_multi_w
     }
 }
 
+/**
+ * @brief CPU multi-writer for THREAD scope (homogeneous CPU-only)
+ * @param buffer Thread-scoped atomic buffer
+ * @param r_signal Reader readiness counter (waits for CPU_NUM_THREADS - 4)
+ * @param w_signal Thread scope writer flag
+ * @param fb_signal Fallback timeout mechanism
+ * 
+ * TIMING POINT: Use std::chrono - time write loop (value 10) + flag store → sleep(5) → write (value 1)
+ * Part of multi-writer pattern with 4 concurrent CPU writers
+ */
 static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_thread_propagation_hierarchy(bufferElement_t * buffer, flag_d * r_signal, flag_t * w_signal, flag_s * fb_signal) {
     
     printf("CPU Writer %d\n", sched_getcpu());
