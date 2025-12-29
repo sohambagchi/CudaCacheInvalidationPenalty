@@ -1,0 +1,30 @@
+patterns:
+  - name: hopper_vp_invalidation_check
+    description: Test for writer-initiated invalidations. Writer sets device flag. Relaxed reader in diff block checks data.
+    multi_writer: false
+    
+    gpu:
+      num_blocks: 8
+      threads_per_block: 64
+      
+      blocks:
+        # Block 0: Writer T0 and Local Reader T1
+        block_0:
+          thread_0: {role: writer, scope: device, ordering: relaxed}
+          threads_1_31: {role: dummy_reader}
+          thread_32: {role: reader, ordering: relaxed, watch_flag: device}
+          threads_33_63: {role: dummy_reader}
+        
+        # Block 1: Remote Reader (Different CTA) - The Critical Test
+        block_1:
+          thread_0: {role: reader, ordering: relaxed, watch_flag: device}
+          threads_1_63: {role: dummy_reader}
+        
+        # Background traffic
+        blocks_2_7:
+          all_threads: {role: dummy_reader}
+    
+    cpu:
+      num_threads: 32
+      threads:
+        all_threads: {role: inactive}

@@ -1,0 +1,24 @@
+# Test Pattern 2: Simple Writer-Reader Test
+# Single writer in block 0, single reader in block 0, rest are dummy
+
+patterns:
+  - name: "test_simple_writer_reader"
+    description: "Simple test - one writer, one reader with acquire-release"
+    
+    gpu:
+      num_blocks: 8
+      threads_per_block: 64
+      
+      blocks:
+        block_0:
+          thread_0: {role: writer, scope: device, ordering: release}
+          thread_1: {role: reader, scope: device, ordering: acquire, watch_flag: device}
+          threads_2_63: {role: dummy_reader}
+        
+        blocks_1_7:
+          all_threads: {role: dummy_reader}
+    
+    cpu:
+      num_threads: 32
+      threads:
+        all_threads: {role: inactive}

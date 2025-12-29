@@ -1,0 +1,19 @@
+# Test Pattern 1: All Dummy (Sanity Check)
+# All threads are dummy readers - simplest test case
+
+patterns:
+  - name: "test_all_dummy"
+    description: "Sanity check - all threads run dummy operations"
+    
+    gpu:
+      num_blocks: 8
+      threads_per_block: 64
+      
+      blocks:
+        blocks_0_7:
+          all_threads: {role: dummy_reader}
+    
+    cpu:
+      num_threads: 32
+      threads:
+        all_threads: {role: inactive}

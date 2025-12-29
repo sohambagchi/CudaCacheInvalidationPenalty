@@ -1,0 +1,24 @@
+patterns:
+  - name: grace_hopper_gpu_to_cpu
+    description: GPU writes device flag. CPU relaxed reader checks visibility.
+    multi_writer: false
+    
+    gpu:
+      num_blocks: 8
+      threads_per_block: 64
+      
+      blocks:
+        # GPU Writer
+        block_0:
+          thread_0: {role: writer, scope: system, ordering: relaxed}
+          threads_1_63: {role: dummy_reader}
+          
+        blocks_1_7:
+          all_threads: {role: dummy_reader}
+    
+    cpu:
+      num_threads: 32
+      threads:
+        # CPU Reader: Watches system flag from GPU
+        thread_0: {role: reader, ordering: relaxed, watch_flag: system}
+        threads_1_31: {role: dummy_reader}

@@ -1,0 +1,37 @@
+# Test Pattern 4: Warp-Level Mixing
+# Tests acquire effect within a warp (32 threads)
+
+patterns:
+  - name: "warp_level_acquire_effect"
+    description: "Test acquire effect within warp (32 threads)"
+    
+    gpu:
+      num_blocks: 8
+      threads_per_block: 64
+      
+      blocks:
+        block_0:
+          thread_0: {role: writer, scope: device, ordering: release}
+          threads_1_63: {role: dummy_reader}
+        
+        # Block 1: Warp 0 has 1 acquire + 31 relaxed
+        block_1:
+          thread_0: {role: reader, scope: device, ordering: acquire, watch_flag: device}
+          threads_1_31: {role: reader, scope: thread, ordering: relaxed, watch_flag: thread}
+          # Warp 1: All relaxed (control group)
+          threads_32_63: {role: reader, scope: thread, ordering: relaxed, watch_flag: thread}
+        
+        # Block 2: All relaxed (cross-CTA control)
+        block_2:
+          all_threads: {role: reader, scope: thread, ordering: relaxed, watch_flag: thread}
+        
+        # Blocks 3-7: Dummy
+        blocks_3_7:
+          all_threads: {role: dummy_reader}
+    
+    cpu:
+      num_threads: 32
+      threads:
+        threads_0_7: {role: reader, ordering: acquire, scope: system, watch_flag: system}
+        threads_8_15: {role: reader, ordering: relaxed, scope: device, watch_flag: device}
+        threads_16_31: {role: inactive}

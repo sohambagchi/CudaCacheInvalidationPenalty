@@ -1,0 +1,47 @@
+# Test Pattern 3: Isolated Acquire Per CTA
+# Tests if single acquire in a CTA affects other relaxed loads
+# This is the main pattern for testing cache invalidation effects
+
+patterns:
+  - name: "isolated_acquire_per_cta"
+    description: "Test if single acquire in CTA affects other relaxed loads - all watching device scope"
+    
+    gpu:
+      num_blocks: 8
+      threads_per_block: 64
+      
+      blocks:
+        # Block 0: Writer (provides device-scope signal)
+        block_0:
+          thread_0: {role: writer, scope: device, ordering: release}
+          threads_1_63: {role: dummy_reader}
+        
+        # Block 1: One device-acquire + 63 device-relaxed
+        # Tests if the acquire affects the relaxed threads in same CTA
+        block_1:
+          thread_0: {role: reader, scope: device, ordering: acquire, watch_flag: device}
+          threads_1_63: {role: reader, scope: device, ordering: relaxed, watch_flag: device}
+        
+        # Block 2: All device-relaxed (control - no acquire)
+        block_2:
+          all_threads: {role: reader, scope: device, ordering: relaxed, watch_flag: device}
+        
+        # Block 3: Mix - first 32 threads have one acquire
+        block_3:
+          thread_0: {role: reader, scope: device, ordering: acquire, watch_flag: device}
+          threads_1_31: {role: reader, scope: device, ordering: relaxed, watch_flag: device}
+          threads_32_63: {role: reader, scope: device, ordering: relaxed, watch_flag: device}
+        
+        # Block 4: All device-acquire (saturated acquire)
+        block_4:
+          all_threads: {role: reader, scope: device, ordering: acquire, watch_flag: device}
+        
+        # Blocks 5-7: Dummy load for background traffic
+        blocks_5_7:
+          thread_0: {role: dummy_writer}
+          threads_1_63: {role: dummy_reader}
+    
+    cpu:
+      num_threads: 32
+      threads:
+        all_threads: {role: inactive}

@@ -1,0 +1,63 @@
+patterns:
+  - name: multi_writer_heterogeneous
+    description: Multi-writer with CPU writers (thread/device) and GPU writers (block/system), readers distributed across both
+    multi_writer: true
+    
+    gpu:
+      num_blocks: 8
+      threads_per_block: 64
+      
+      blocks:
+        # Block 0: GPU writers for block and system scopes
+        block_0:
+          thread_0: {role: writer, scope: block, ordering: release}
+          thread_1: {role: writer, scope: system, ordering: release}
+          
+          # GPU readers for all scopes (acquire)
+          threads_2_5: {role: reader, ordering: acquire, watch_flag: thread}
+          threads_6_9: {role: reader, ordering: acquire, watch_flag: block}
+          threads_10_13: {role: reader, ordering: acquire, watch_flag: device}
+          threads_14_17: {role: reader, ordering: acquire, watch_flag: system}
+          
+          threads_18_63: {role: dummy_reader}
+        
+        # Block 1: GPU readers with relaxed ordering
+        block_1:
+          threads_0_3: {role: reader, ordering: relaxed, watch_flag: thread}
+          threads_4_7: {role: reader, ordering: relaxed, watch_flag: block}
+          threads_8_11: {role: reader, ordering: relaxed, watch_flag: device}
+          threads_12_15: {role: reader, ordering: relaxed, watch_flag: system}
+          threads_16_63: {role: dummy_reader}
+        
+        # Block 2: Mixed acquire/relaxed readers
+        block_2:
+          thread_0: {role: reader, ordering: acquire, watch_flag: thread}
+          threads_1_15: {role: reader, ordering: relaxed, watch_flag: thread}
+          
+          thread_16: {role: reader, ordering: acquire, watch_flag: block}
+          threads_17_31: {role: reader, ordering: relaxed, watch_flag: block}
+          
+          threads_32_63: {role: dummy_reader}
+        
+        # Blocks 3-7: Dummy threads for consistent occupancy
+        blocks_3_7:
+          all_threads: {role: dummy_reader}
+    
+    cpu:
+      num_threads: 32
+      threads:
+        # CPU writers for thread and device scopes
+        thread_0: {role: writer, scope: thread, ordering: release}
+        thread_1: {role: writer, scope: device, ordering: release}
+        
+        # CPU readers for all scopes (acquire)
+        threads_2_5: {role: reader, ordering: acquire, watch_flag: thread}
+        threads_6_9: {role: reader, ordering: acquire, watch_flag: block}
+        threads_10_13: {role: reader, ordering: acquire, watch_flag: device}
+        threads_14_17: {role: reader, ordering: acquire, watch_flag: system}
+        
+        # CPU readers with relaxed ordering
+        threads_18_21: {role: reader, ordering: relaxed, watch_flag: thread}
+        threads_22_25: {role: reader, ordering: relaxed, watch_flag: block}
+        threads_26_29: {role: reader, ordering: relaxed, watch_flag: device}
+        threads_30_31: {role: reader, ordering: relaxed, watch_flag: system}

@@ -1,0 +1,32 @@
+patterns:
+  - name: hopper_vp_self_invalidation
+    description: Test if Acquire on remote reader triggers L1 self-invalidation to see fresh data.
+    multi_writer: false
+    
+    gpu:
+      num_blocks: 8
+      threads_per_block: 64
+      
+      blocks:
+        # Block 0: Writer
+        block_0:
+          thread_0: {role: writer, scope: device, ordering: relaxed}
+          threads_1_63: {role: dummy_reader}
+        
+        # Block 1: Remote Reader using ACQUIRE (Should pass)
+        block_1:
+          thread_0: {role: reader, ordering: acquire, watch_flag: device}
+          threads_1_63: {role: dummy_reader}
+        
+        # Block 2: Remote Reader using RELAXED (Control - Should fail/see stale)
+        block_2:
+          thread_0: {role: reader, ordering: relaxed, watch_flag: device}
+          threads_1_63: {role: dummy_reader}
+
+        blocks_3_7:
+          all_threads: {role: dummy_reader}
+    
+    cpu:
+      num_threads: 32
+      threads:
+        all_threads: {role: inactive}
