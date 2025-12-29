@@ -19,6 +19,27 @@ __device__ void cudaSleep(clock_t sleep_cycles) {
 __constant__ ThreadConfig d_pattern_gpu[8][64];
 
 // ============================================================================
+// TIMING CALIBRATION
+// ============================================================================
+
+/**
+ * @brief Calibration kernel to measure clock64() overhead
+ * Performs repeated clock64() calls to measure average overhead
+ */
+__global__ void calibrate_clock_overhead(clock_t *results, int num_samples) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid == 0) {
+        clock_t total_overhead = 0;
+        for (int i = 0; i < num_samples; i++) {
+            clock_t start = clock64();
+            clock_t end = clock64();
+            total_overhead += (end - start);
+        }
+        results[0] = total_overhead / num_samples;
+    }
+}
+
+// ============================================================================
 // GPU READER VARIANTS
 // ============================================================================
 
@@ -27,35 +48,96 @@ __constant__ ThreadConfig d_pattern_gpu[8][64];
  * Waits for writer signal with acquire semantics
  */
 template <typename B, typename W, typename R>
-__device__ void gpu_buffer_reader_acquire(
+__device__ void gpu_buffer_reader_acquire_no_cache(
     B *buffer, bufferElement_na *results,
-    R *r_signal, W *w_signal, flag_s *fallback_signal
+    R *r_signal, W *w_signal, flag_s *fallback_signal,
+    gpu_timing_data *timing
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint result = 0;
     
-    #ifdef CONSUMERS_CACHE
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-        result += buffer[i].data.load(cuda::memory_order_relaxed);
-    }
-    #endif
+    timing[tid].block_id = blockIdx.x;
+    timing[tid].thread_id = threadIdx.x;
+    timing[tid].consumer_type = 1;  // reader_acq
+    timing[tid].caching = false;
     
     results[tid].data = result;
     r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
     result = 0;
     
+    // Record start time
+    timing[tid].start_time = clock64();
+
     // ACQUIRE LOAD on flag
     while(w_signal->flag.load(cuda::memory_order_acquire) == 0 && 
           fallback_signal->flag.load(cuda::memory_order_relaxed) < 3) {
         // Wait
     }
     
+    // Record flag trigger time
+    timing[tid].flag_trigger_time = clock64();
+    
     for (int i = 0; i < BUFFER_SIZE; i++) {
         result += buffer[i].data.load(cuda::memory_order_relaxed);
     }
     
     results[tid].data = result;
-    printf("B[%d] T[%d] ACQ Result %d\n", blockIdx.x, threadIdx.x, result);
+    
+    // Record end time
+    timing[tid].end_time = clock64();
+    
+    printf("B[%d] T[%d] NC-ACQ Result %d\n", blockIdx.x, threadIdx.x, result);
+}
+
+/**
+ * @brief GPU buffer reader with ACQUIRE memory ordering
+ * Waits for writer signal with acquire semantics
+ */
+template <typename B, typename W, typename R>
+__device__ void gpu_buffer_reader_acquire_caching(
+    B *buffer, bufferElement_na *results,
+    R *r_signal, W *w_signal, flag_s *fallback_signal,
+    gpu_timing_data *timing
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint result = 0;
+    
+    timing[tid].block_id = blockIdx.x;
+    timing[tid].thread_id = threadIdx.x;
+    timing[tid].consumer_type = 1;  // reader_acq
+    timing[tid].caching = true;
+    
+    // Prefetch buffer to warm cache BEFORE signaling readiness
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    results[tid].data = result;
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+    result = 0;
+    
+    // Record start time
+    timing[tid].start_time = clock64();
+
+    // ACQUIRE LOAD on flag
+    while(w_signal->flag.load(cuda::memory_order_acquire) == 0 && 
+          fallback_signal->flag.load(cuda::memory_order_relaxed) < 3) {
+        // Wait
+    }
+    
+    // Record flag trigger time
+    timing[tid].flag_trigger_time = clock64();
+    
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    results[tid].data = result;
+    
+    // Record end time
+    timing[tid].end_time = clock64();
+    
+    printf("B[%d] T[%d] C-ACQ Result %d\n", blockIdx.x, threadIdx.x, result);
 }
 
 /**
@@ -63,22 +145,25 @@ __device__ void gpu_buffer_reader_acquire(
  * Waits for writer signal with relaxed semantics
  */
 template <typename B, typename W, typename R>
-__device__ void gpu_buffer_reader_relaxed(
+__device__ void gpu_buffer_reader_relaxed_no_cache(
     B *buffer, bufferElement_na *results,
-    R *r_signal, W *w_signal, flag_s *fallback_signal
+    R *r_signal, W *w_signal, flag_s *fallback_signal,
+    gpu_timing_data *timing
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint result = 0;
     
-    #ifdef CONSUMERS_CACHE
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-        result += buffer[i].data.load(cuda::memory_order_relaxed);
-    }
-    #endif
+    timing[tid].block_id = blockIdx.x;
+    timing[tid].thread_id = threadIdx.x;
+    timing[tid].consumer_type = 2;  // reader_rlx
+    timing[tid].caching = false;
     
     results[tid].data = result;
     r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
     result = 0;
+
+    // Record start time
+    timing[tid].start_time = clock64();
     
     // RELAXED LOAD on flag
     while(w_signal->flag.load(cuda::memory_order_relaxed) == 0 && 
@@ -86,12 +171,70 @@ __device__ void gpu_buffer_reader_relaxed(
         // Wait
     }
     
+    // Record flag trigger time
+    timing[tid].flag_trigger_time = clock64();
+    
     for (int i = 0; i < BUFFER_SIZE; i++) {
         result += buffer[i].data.load(cuda::memory_order_relaxed);
     }
     
     results[tid].data = result;
-    printf("B[%d] T[%d] RLX Result %d\n", blockIdx.x, threadIdx.x, result);
+    
+    // Record end time
+    timing[tid].end_time = clock64();
+    
+    printf("B[%d] T[%d] NC-RLX Result %d\n", blockIdx.x, threadIdx.x, result);
+}
+
+/**
+ * @brief GPU buffer reader with RELAXED memory ordering
+ * Waits for writer signal with relaxed semantics
+ */
+template <typename B, typename W, typename R>
+__device__ void gpu_buffer_reader_relaxed_caching(
+    B *buffer, bufferElement_na *results,
+    R *r_signal, W *w_signal, flag_s *fallback_signal,
+    gpu_timing_data *timing
+) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint result = 0;
+    
+    timing[tid].block_id = blockIdx.x;
+    timing[tid].thread_id = threadIdx.x;
+    timing[tid].consumer_type = 2;  // reader_rlx
+    timing[tid].caching = true;
+    
+    // Prefetch buffer to warm cache BEFORE signaling readiness
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    results[tid].data = result;
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+    result = 0;
+
+    // Record start time
+    timing[tid].start_time = clock64();
+    
+    // RELAXED LOAD on flag
+    while(w_signal->flag.load(cuda::memory_order_relaxed) == 0 && 
+          fallback_signal->flag.load(cuda::memory_order_relaxed) < 3) {
+        // Wait
+    }
+    
+    // Record flag trigger time
+    timing[tid].flag_trigger_time = clock64();
+    
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    results[tid].data = result;
+    
+    // Record end time
+    timing[tid].end_time = clock64();
+    
+    printf("B[%d] T[%d] C-RLX Result %d\n", blockIdx.x, threadIdx.x, result);
 }
 
 // ============================================================================
@@ -111,7 +254,7 @@ __device__ void gpu_buffer_writer_release(
     printf("GPU Writer (Release)\n");
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 1) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 1) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(10, cuda::memory_order_relaxed);
@@ -156,7 +299,7 @@ __device__ void gpu_buffer_writer_relaxed(
     printf("GPU Writer (Relaxed)\n");
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 1) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 1) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(10, cuda::memory_order_relaxed);
@@ -201,7 +344,7 @@ __device__ void gpu_buffer_multi_writer_thread_release(
     printf("GPU Multi-Writer THREAD (Release) B[%d] T[%d]\n", blockIdx.x, threadIdx.x);
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 4) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(10, cuda::memory_order_relaxed);
@@ -225,7 +368,7 @@ __device__ void gpu_buffer_multi_writer_thread_relaxed(
     printf("GPU Multi-Writer THREAD (Relaxed) B[%d] T[%d]\n", blockIdx.x, threadIdx.x);
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 4) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(10, cuda::memory_order_relaxed);
@@ -249,7 +392,7 @@ __device__ void gpu_buffer_multi_writer_block_release(
     printf("GPU Multi-Writer BLOCK (Release) B[%d] T[%d]\n", blockIdx.x, threadIdx.x);
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 4) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(20, cuda::memory_order_relaxed);
@@ -273,7 +416,7 @@ __device__ void gpu_buffer_multi_writer_block_relaxed(
     printf("GPU Multi-Writer BLOCK (Relaxed) B[%d] T[%d]\n", blockIdx.x, threadIdx.x);
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 4) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(20, cuda::memory_order_relaxed);
@@ -297,7 +440,7 @@ __device__ void gpu_buffer_multi_writer_device_release(
     printf("GPU Multi-Writer DEVICE (Release) B[%d] T[%d]\n", blockIdx.x, threadIdx.x);
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 4) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(30, cuda::memory_order_relaxed);
@@ -321,7 +464,7 @@ __device__ void gpu_buffer_multi_writer_device_relaxed(
     printf("GPU Multi-Writer DEVICE (Relaxed) B[%d] T[%d]\n", blockIdx.x, threadIdx.x);
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 4) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(30, cuda::memory_order_relaxed);
@@ -345,7 +488,7 @@ __device__ void gpu_buffer_multi_writer_system_release(
     printf("GPU Multi-Writer SYSTEM (Release) B[%d] T[%d]\n", blockIdx.x, threadIdx.x);
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 4) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(40, cuda::memory_order_relaxed);
@@ -369,7 +512,7 @@ __device__ void gpu_buffer_multi_writer_system_relaxed(
     printf("GPU Multi-Writer SYSTEM (Relaxed) B[%d] T[%d]\n", blockIdx.x, threadIdx.x);
     
     while (r_signal->flag.load(cuda::memory_order_relaxed) != 
-           GPU_NUM_BLOCKS * GPU_NUM_THREADS - 4) {}
+           GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 4) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(40, cuda::memory_order_relaxed);
@@ -389,6 +532,19 @@ __device__ void gpu_buffer_multi_writer_system_relaxed(
 // ============================================================================
 
 /**
+ * @brief Helper to convert ThreadScope to uint8_t for timing data
+ */
+__device__ inline uint8_t scope_to_uint8(ThreadScope scope) {
+    switch (scope) {
+        case ThreadScope::THREAD: return 0;
+        case ThreadScope::BLOCK: return 1;
+        case ThreadScope::DEVICE: return 2;
+        case ThreadScope::SYSTEM: return 3;
+        default: return 2;  // Default to device
+    }
+}
+
+/**
  * @brief Dispatch reader to appropriate variant based on ordering
  */
 __device__ void dispatch_reader(
@@ -398,45 +554,82 @@ __device__ void dispatch_reader(
     flag_d *r_signal,
     flag_t *w_t_signal, flag_b *w_b_signal,
     flag_d *w_d_signal, flag_s *w_s_signal,
-    flag_s *fallback_signal
+    flag_s *fallback_signal,
+    gpu_timing_data *timing
 ) {
+    // Set flag type in timing data
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    timing[tid].flag_type = scope_to_uint8(cfg.watch_flag);
+    
     if (cfg.ordering == MemoryOrdering::ACQUIRE) {
         // Dispatch to acquire reader with appropriate flag type
         switch (cfg.watch_flag) {
             case ThreadScope::THREAD:
-                gpu_buffer_reader_acquire(buffer, results, r_signal,
-                                        w_t_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_acquire_caching(buffer, results, r_signal,
+                                        w_t_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_acquire_no_cache(buffer, results, r_signal,
+                                        w_t_signal, fallback_signal, timing);
                 break;
             case ThreadScope::BLOCK:
-                gpu_buffer_reader_acquire(buffer, results, r_signal,
-                                        w_b_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_acquire_caching(buffer, results, r_signal,
+                                        w_b_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_acquire_no_cache(buffer, results, r_signal,
+                                        w_b_signal, fallback_signal, timing);
                 break;
             case ThreadScope::DEVICE:
-                gpu_buffer_reader_acquire(buffer, results, r_signal,
-                                        w_d_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_acquire_caching(buffer, results, r_signal,
+                                        w_d_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_acquire_no_cache(buffer, results, r_signal,
+                                        w_d_signal, fallback_signal, timing);
                 break;
             case ThreadScope::SYSTEM:
-                gpu_buffer_reader_acquire(buffer, results, r_signal,
-                                        w_s_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_acquire_caching(buffer, results, r_signal,
+                                        w_s_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_acquire_no_cache(buffer, results, r_signal,
+                                        w_s_signal, fallback_signal, timing);
                 break;
         }
     } else {  // RELAXED
         switch (cfg.watch_flag) {
             case ThreadScope::THREAD:
-                gpu_buffer_reader_relaxed(buffer, results, r_signal,
-                                        w_t_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_relaxed_caching(buffer, results, r_signal,
+                                        w_t_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_relaxed_no_cache(buffer, results, r_signal,
+                                        w_t_signal, fallback_signal, timing);
                 break;
             case ThreadScope::BLOCK:
-                gpu_buffer_reader_relaxed(buffer, results, r_signal,
-                                        w_b_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_relaxed_caching(buffer, results, r_signal,
+                                        w_b_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_relaxed_no_cache(buffer, results, r_signal,
+                                        w_b_signal, fallback_signal, timing);
                 break;
             case ThreadScope::DEVICE:
-                gpu_buffer_reader_relaxed(buffer, results, r_signal,
-                                        w_d_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_relaxed_caching(buffer, results, r_signal,
+                                        w_d_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_relaxed_no_cache(buffer, results, r_signal,
+                                        w_d_signal, fallback_signal, timing);
                 break;
             case ThreadScope::SYSTEM:
-                gpu_buffer_reader_relaxed(buffer, results, r_signal,
-                                        w_s_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_relaxed_caching(buffer, results, r_signal,
+                                        w_s_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_relaxed_no_cache(buffer, results, r_signal,
+                                        w_s_signal, fallback_signal, timing);
                 break;
         }
     }
@@ -517,36 +710,73 @@ __device__ void dispatch_multi_reader(
     flag_d *r_signal,
     flag_t *w_t_signal, flag_b *w_b_signal,
     flag_d *w_d_signal, flag_s *w_s_signal,
-    flag_s *fallback_signal
+    flag_s *fallback_signal,
+    gpu_timing_data *timing
 ) {
+    // Set flag type in timing data
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    timing[tid].flag_type = scope_to_uint8(cfg.watch_flag);
+    
     if (cfg.ordering == MemoryOrdering::ACQUIRE) {
         switch (cfg.watch_flag) {
             case ThreadScope::THREAD:
-                gpu_buffer_reader_acquire(buffer_t, results, r_signal, w_t_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_acquire_caching(buffer_t, results, r_signal,
+                                        w_t_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_acquire_no_cache(buffer_t, results, r_signal, w_t_signal, fallback_signal, timing);
                 break;
             case ThreadScope::BLOCK:
-                gpu_buffer_reader_acquire(buffer_b, results, r_signal, w_b_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_acquire_caching(buffer_b, results, r_signal,
+                                        w_b_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_acquire_no_cache(buffer_b, results, r_signal, w_b_signal, fallback_signal, timing);
                 break;
             case ThreadScope::DEVICE:
-                gpu_buffer_reader_acquire(buffer_d, results, r_signal, w_d_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_acquire_caching(buffer_d, results, r_signal,
+                                        w_d_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_acquire_no_cache(buffer_d, results, r_signal, w_d_signal, fallback_signal, timing);
                 break;
             case ThreadScope::SYSTEM:
-                gpu_buffer_reader_acquire(buffer_s, results, r_signal, w_s_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_acquire_caching(buffer_s, results, r_signal,
+                                        w_s_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_acquire_no_cache(buffer_s, results, r_signal, w_s_signal, fallback_signal, timing);
                 break;
         }
     } else {  // RELAXED
         switch (cfg.watch_flag) {
             case ThreadScope::THREAD:
-                gpu_buffer_reader_relaxed(buffer_t, results, r_signal, w_t_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_relaxed_caching(buffer_t, results, r_signal,
+                                        w_t_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_relaxed_no_cache(buffer_t, results, r_signal, w_t_signal, fallback_signal, timing);
                 break;
             case ThreadScope::BLOCK:
-                gpu_buffer_reader_relaxed(buffer_b, results, r_signal, w_b_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_relaxed_caching(buffer_b, results, r_signal,
+                                        w_b_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_relaxed_no_cache(buffer_b, results, r_signal, w_b_signal, fallback_signal, timing);
                 break;
             case ThreadScope::DEVICE:
-                gpu_buffer_reader_relaxed(buffer_d, results, r_signal, w_d_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_relaxed_caching(buffer_d, results, r_signal,
+                                        w_d_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_relaxed_no_cache(buffer_d, results, r_signal, w_d_signal, fallback_signal, timing);
                 break;
             case ThreadScope::SYSTEM:
-                gpu_buffer_reader_relaxed(buffer_s, results, r_signal, w_s_signal, fallback_signal);
+                if (cfg.caching)
+                    gpu_buffer_reader_relaxed_caching(buffer_s, results, r_signal,
+                                        w_s_signal, fallback_signal, timing);
+                else
+                    gpu_buffer_reader_relaxed_no_cache(buffer_s, results, r_signal, w_s_signal, fallback_signal, timing);
                 break;
         }
     }
@@ -590,7 +820,7 @@ __device__ void gpu_dummy_writer_worker_propagation(
     flag_d *r_signal
 ) {
     // Wait for readers to be ready
-    while (r_signal->flag.load(cuda::memory_order_relaxed) < (GPU_NUM_BLOCKS * GPU_NUM_THREADS - 1)) {}
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
     
     // Background write load
     for (int iter = 0; iter < NUM_ITERATIONS; iter++) {
@@ -618,7 +848,8 @@ __device__ void dispatch_gpu_thread(
     flag_d *r_signal,
     flag_t *w_t_signal, flag_b *w_b_signal,
     flag_d *w_d_signal, flag_s *w_s_signal,
-    flag_s *fallback_signal
+    flag_s *fallback_signal,
+    gpu_timing_data *timing
 ) {
     // Fetch config from constant memory
     ThreadConfig cfg = d_pattern_gpu[bid][tid];
@@ -633,18 +864,27 @@ __device__ void dispatch_gpu_thread(
         case ThreadRole::READER:
             dispatch_reader(cfg, buffer, results, r_signal,
                           w_t_signal, w_b_signal, w_d_signal, w_s_signal,
-                          fallback_signal);
+                          fallback_signal, timing);
             break;
             
         case ThreadRole::DUMMY_READER:
             gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
             break;
-            
         case ThreadRole::DUMMY_WRITER:
             gpu_dummy_writer_worker_propagation(dummy_buffer, r_signal);
             break;
-            
         case ThreadRole::INACTIVE:
+            // Signal readiness so writer doesn't deadlock waiting for inactive threads
+            r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+            // Don't time dummy or inactive threads
+            {
+                int global_tid = bid * GPU_NUM_THREADS + tid;
+                timing[global_tid].consumer_type = 0;  // inactive
+                timing[global_tid].start_time = 0;
+                timing[global_tid].flag_trigger_time = 0;
+                timing[global_tid].end_time = 0;
+            }
+            break;
         default:
             // Do nothing
             break;
@@ -664,7 +904,8 @@ __device__ void dispatch_gpu_thread_multi(
     flag_d *r_signal,
     flag_t *w_t_signal, flag_b *w_b_signal,
     flag_d *w_d_signal, flag_s *w_s_signal,
-    flag_s *fallback_signal
+    flag_s *fallback_signal,
+    gpu_timing_data *timing
 ) {
     // Fetch config from constant memory
     ThreadConfig cfg = d_pattern_gpu[bid][tid];
@@ -680,18 +921,25 @@ __device__ void dispatch_gpu_thread_multi(
             dispatch_multi_reader(cfg, buffer_t, buffer_b, buffer_d, buffer_s,
                                 results, r_signal,
                                 w_t_signal, w_b_signal, w_d_signal, w_s_signal,
-                                fallback_signal);
+                                fallback_signal, timing);
             break;
             
         case ThreadRole::DUMMY_READER:
             gpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
-            break;
-            
         case ThreadRole::DUMMY_WRITER:
             gpu_dummy_writer_worker_propagation(dummy_buffer, r_signal);
-            break;
-            
         case ThreadRole::INACTIVE:
+            // Signal readiness so writer doesn't deadlock waiting for inactive threads
+            r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+            // Don't time dummy or inactive threads
+            {
+                int global_tid = bid * GPU_NUM_THREADS + tid;
+                timing[global_tid].consumer_type = 0;  // inactive
+                timing[global_tid].start_time = 0;
+                timing[global_tid].flag_trigger_time = 0;
+                timing[global_tid].end_time = 0;
+            }
+            break;
         default:
             // Do nothing
             break;
@@ -709,12 +957,13 @@ __global__ void pattern_orchestrator(
     flag_d *r_signal,
     flag_t *w_t_signal, flag_b *w_b_signal,
     flag_d *w_d_signal, flag_s *w_s_signal,
-    flag_s *fallback_signal
+    flag_s *fallback_signal,
+    gpu_timing_data *timing
 ) {
     dispatch_gpu_thread(blockIdx.x, threadIdx.x,
                        buffer, dummy_buffer, results,
                        r_signal, w_t_signal, w_b_signal,
-                       w_d_signal, w_s_signal, fallback_signal);
+                       w_d_signal, w_s_signal, fallback_signal, timing);
 }
 
 /**
@@ -729,13 +978,14 @@ __global__ void pattern_orchestrator_multi(
     flag_d *r_signal,
     flag_t *w_t_signal, flag_b *w_b_signal,
     flag_d *w_d_signal, flag_s *w_s_signal,
-    flag_s *fallback_signal
+    flag_s *fallback_signal,
+    gpu_timing_data *timing
 ) {
     dispatch_gpu_thread_multi(blockIdx.x, threadIdx.x,
                              buffer_t, buffer_b, buffer_d, buffer_s,
                              dummy_buffer, results,
                              r_signal, w_t_signal, w_b_signal,
-                             w_d_signal, w_s_signal, fallback_signal);
+                             w_d_signal, w_s_signal, fallback_signal, timing);
 }
 
 #endif // PATTERN_DISPATCH_CUH

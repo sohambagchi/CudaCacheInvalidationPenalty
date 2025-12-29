@@ -38,15 +38,15 @@ typedef uint16_t DATA_SIZE;
 typedef uint8_t DATA_SIZE;
 #endif
 
-// #ifdef CUDA_THREAD_SCOPE_THREAD
-// #define CUDA_THREAD_SCOPE cuda::thread_scope_thread
-// #elif defined(CUDA_THREAD_SCOPE_BLOCK)
-// #define CUDA_THREAD_SCOPE cuda::thread_scope_block
-// #elif defined(CUDA_THREAD_SCOPE_DEVICE)
-// #define CUDA_THREAD_SCOPE cuda::thread_scope_device
-// #elif defined(CUDA_THREAD_SCOPE_SYSTEM)
-// #define CUDA_THREAD_SCOPE cuda::thread_scope_system
-// #endif
+#ifdef CUDA_THREAD_SCOPE_THREAD
+#define CUDA_THREAD_SCOPE cuda::thread_scope_thread
+#elif defined(CUDA_THREAD_SCOPE_BLOCK)
+#define CUDA_THREAD_SCOPE cuda::thread_scope_block
+#elif defined(CUDA_THREAD_SCOPE_DEVICE)
+#define CUDA_THREAD_SCOPE cuda::thread_scope_device
+#elif defined(CUDA_THREAD_SCOPE_SYSTEM)
+#define CUDA_THREAD_SCOPE cuda::thread_scope_system
+#endif
 
 /**
  * @brief Memory allocator selection
@@ -92,7 +92,7 @@ typedef enum {
  * and isolate cache line effects. Uses system scope atomics by default.
  */
 typedef struct bufferElement {
-    cuda::atomic<DATA_SIZE, cuda::thread_scope_system> data;
+    cuda::atomic<DATA_SIZE, cuda::thread_scope_thread> data;
     char padding[PAGE_SIZE - sizeof(DATA_SIZE)];
 } bufferElement;
 
@@ -156,5 +156,42 @@ typedef struct flag_s {
     cuda::atomic<uint32_t, cuda::thread_scope_system> flag;
     char padding[PAGE_SIZE - sizeof(uint32_t)];
 } flag_s;
+
+/**
+ * @brief GPU timing data for performance instrumentation
+ * 
+ * Records timing information for GPU reader threads.
+ * Page-aligned to prevent false sharing across threads.
+ * Clock values are from clock64() GPU timer.
+ */
+typedef struct gpu_timing_data {
+    clock_t start_time;         ///< Thread entry time
+    clock_t flag_trigger_time;  ///< Time when flag was observed
+    clock_t end_time;           ///< Thread exit time
+    uint32_t block_id;          ///< Block ID
+    uint32_t thread_id;         ///< Thread ID within block
+    uint8_t consumer_type;      ///< 0=inactive, 1=reader_acq, 2=reader_rlx, 3=dummy
+    uint8_t flag_type;          ///< 0=thread, 1=block, 2=device, 3=system
+    bool caching;                 ///< Whether caching variant was used
+    char padding[PAGE_SIZE - sizeof(clock_t)*3 - sizeof(uint32_t)*2 - sizeof(uint8_t)*2];
+} gpu_timing_data;
+
+/**
+ * @brief CPU timing data for performance instrumentation
+ * 
+ * Records timing information for CPU reader threads.
+ * Page-aligned to prevent false sharing across threads.
+ * Time values are nanoseconds from std::chrono::high_resolution_clock.
+ */
+typedef struct cpu_timing_data {
+    uint64_t start_ns;          ///< Thread entry time (nanoseconds)
+    uint64_t flag_trigger_ns;   ///< Time when flag was observed (nanoseconds)
+    uint64_t end_ns;            ///< Thread exit time (nanoseconds)
+    uint32_t thread_id;         ///< CPU thread/core ID
+    uint8_t consumer_type;      ///< 0=inactive, 1=reader_acq, 2=reader_rlx, 3=dummy
+    uint8_t flag_type;          ///< 0=thread, 1=block, 2=device, 3=system
+    bool caching;                 ///< Whether caching variant was used
+    char padding[PAGE_SIZE - sizeof(uint64_t)*3 - sizeof(uint32_t) - sizeof(uint8_t)*2];
+} cpu_timing_data;
 
 #endif // TYPES_H

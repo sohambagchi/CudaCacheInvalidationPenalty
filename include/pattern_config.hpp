@@ -92,6 +92,7 @@ struct ThreadConfig {
     ThreadScope scope;
     MemoryOrdering ordering;
     ThreadScope watch_flag;  // Which flag scope to observe
+    bool caching;            // Whether to use caching variant
 };
 
 // Pattern storage

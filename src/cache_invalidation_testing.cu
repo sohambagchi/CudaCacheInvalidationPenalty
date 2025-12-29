@@ -3,12 +3,159 @@
 #include <cstring>
 #include <unistd.h>
 #include <numa.h>
+#include <fstream>
+#include <iomanip>
+#include <chrono>
+#include <sstream>
+#include <thread>
+#include <vector>
+#include <pthread.h>
 #include "pattern_config.hpp"
 #include "pattern_dispatch.cuh"
 #include "pattern_dispatch_cpu.hpp"
 
 // Global pointer to active pattern for CPU threads
 const PatternConfig* g_active_pattern = nullptr;
+
+/**
+ * @brief Write timing data to CSV file with timestamp
+ * 
+ * @param pattern_name Name of the pattern being tested
+ * @param gpu_timing Host copy of GPU timing data
+ * @param num_gpu_threads Total number of GPU threads
+ * @param cpu_timing Host copy of CPU timing data
+ * @param num_cpu_threads Total number of CPU threads
+ * @param clock_overhead Average clock overhead (cycles)
+ */
+void write_timing_csv(const std::string& pattern_name, 
+                      const gpu_timing_data* gpu_timing,
+                      int num_gpu_threads,
+                      const cpu_timing_data* cpu_timing,
+                      int num_cpu_threads,
+                      clock_t clock_overhead,
+                      const bufferElement_na *gpu_results,
+                      const bufferElement_na *cpu_results) {
+    // Generate timestamp
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    std::ostringstream timestamp_stream;
+    timestamp_stream << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S");
+    std::string timestamp = timestamp_stream.str();
+    
+    // Create filename
+    std::string filename = "timing_" + pattern_name + "_" + timestamp + ".csv";
+    
+    printf("[INFO] Writing timing data to CSV file: %s\n", filename.c_str());
+
+    std::ofstream csv(filename);
+    if (!csv.is_open()) {
+        std::cerr << "[ERROR] Could not open timing CSV file: " << filename << std::endl;
+        return;
+    }
+    
+    // Write header
+    csv << "device,block,thread,role,ordering,scope,watch_flag,start_time,flag_time,end_time,duration,wait_time,duration_corrected,buffer_read_time,per_element_read_time,caching,final_value\n";
+    
+    // Convert consumer_type to string
+    auto consumer_type_str = [](uint8_t type) {
+        switch (type) {
+            case 0: return "inactive";
+            case 1: return "reader_acq";
+            case 2: return "reader_rlx";
+            case 3: return "dummy";
+            default: return "unknown";
+        }
+    };
+    
+    // Convert flag_type to string
+    auto flag_type_str = [](uint8_t type) {
+        switch (type) {
+            case 0: return "thread";
+            case 1: return "block";
+            case 2: return "device";
+            case 3: return "system";
+            default: return "unknown";
+        }
+    };
+    
+    // Write GPU timing data
+    for (int i = 0; i < num_gpu_threads; i++) {
+        const auto& t = gpu_timing[i];
+        
+        // Skip inactive threads
+        if (t.consumer_type == 0) continue;
+        
+        clock_t duration = t.end_time - t.start_time;
+        clock_t wait_time = t.flag_trigger_time - t.start_time;
+        
+        // Correct for overhead (approximately)
+        clock_t duration_corrected = duration > (3 * clock_overhead) ? duration - (3 * clock_overhead) : duration;
+        
+        // Calculate buffer read time (time between flag trigger and completion)
+        clock_t buffer_read_time = t.end_time - t.flag_trigger_time;
+        double per_element_read_time = static_cast<double>(buffer_read_time) / BUFFER_SIZE;
+        
+        // Get result value for this thread
+        int tid = t.block_id * 64 + t.thread_id;
+        uint32_t result_value = gpu_results[tid].data;
+        
+        csv << "gpu,"
+            << t.block_id << ","
+            << t.thread_id << ","
+            << consumer_type_str(t.consumer_type) << ","
+            << (t.consumer_type == 1 ? "acquire" : "relaxed") << ","
+            << "N/A,"  // scope (for readers)
+            << flag_type_str(t.flag_type) << ","
+            << t.start_time << ","
+            << t.flag_trigger_time << ","
+            << t.end_time << ","
+            << duration << ","
+            << wait_time << ","
+            << duration_corrected << ","
+            << buffer_read_time << ","
+            << per_element_read_time << ","
+            << (t.caching ? "true" : "false") << ","
+            << result_value << "\n";
+    }
+    
+    // Write CPU timing data
+    for (int i = 0; i < num_cpu_threads; i++) {
+        const auto& t = cpu_timing[i];
+        
+        // Skip inactive threads
+        if (t.consumer_type == 0) continue;
+        
+        uint64_t duration = t.end_ns - t.start_ns;
+        uint64_t wait_time = t.flag_trigger_ns - t.start_ns;
+        
+        // Calculate buffer read time (time between flag trigger and completion)
+        uint64_t buffer_read_time = t.end_ns - t.flag_trigger_ns;
+        double per_element_read_time = static_cast<double>(buffer_read_time) / BUFFER_SIZE;
+        
+        uint32_t result_value = cpu_results[i].data;
+        
+        csv << "cpu,"
+            << "N/A,"  // No blocks on CPU
+            << t.thread_id << ","
+            << consumer_type_str(t.consumer_type) << ","
+            << (t.consumer_type == 1 ? "acquire" : "relaxed") << ","
+            << "N/A,"  // scope (for readers)
+            << flag_type_str(t.flag_type) << ","
+            << t.start_ns << ","
+            << t.flag_trigger_ns << ","
+            << t.end_ns << ","
+            << duration << ","
+            << wait_time << ","
+            << duration << ","  // No overhead correction for CPU
+            << buffer_read_time << ","
+            << per_element_read_time << ","
+            << (t.caching ? "true" : "false") << ","
+            << result_value << "\n";
+    }
+    
+    csv.close();
+    std::cout << "[INFO] Timing data written to: " << filename << std::endl;
+}
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -189,6 +336,41 @@ int main(int argc, char* argv[]) {
     cudaMalloc(&result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
     cudaMemset(result_g, 0, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
     
+    // ========================================================================
+    // TIMING INSTRUMENTATION: Allocate timing arrays
+    // ========================================================================
+    
+    std::cout << "[INFO] Allocating timing instrumentation arrays..." << std::endl;
+    
+    gpu_timing_data *timing_g;  // Device timing array
+    cudaMalloc(&timing_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(gpu_timing_data));
+    cudaMemset(timing_g, 0, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(gpu_timing_data));
+    
+    // Calibrate clock overhead
+    std::cout << "[INFO] Calibrating clock64() overhead..." << std::endl;
+    clock_t *calibration_result_d;
+    cudaMalloc(&calibration_result_d, sizeof(clock_t));
+    
+    const int calibration_samples = 10000;
+    calibrate_clock_overhead<<<1, 1>>>(calibration_result_d, calibration_samples);
+    cudaDeviceSynchronize();
+    
+    clock_t clock_overhead_avg;
+    cudaMemcpy(&clock_overhead_avg, calibration_result_d, sizeof(clock_t), cudaMemcpyDeviceToHost);
+    cudaFree(calibration_result_d);
+    
+    std::cout << "[INFO] Average clock64() overhead: " << clock_overhead_avg << " cycles" << std::endl;
+    
+    // CPU timing allocation
+    cpu_timing_data *timing_c = (cpu_timing_data *) malloc(CPU_NUM_THREADS * sizeof(cpu_timing_data));
+    memset(timing_c, 0, CPU_NUM_THREADS * sizeof(cpu_timing_data));
+    
+    // CPU results allocation
+    bufferElement_na *result_c = (bufferElement_na *) malloc(CPU_NUM_THREADS * sizeof(bufferElement_na));
+    memset(result_c, 0, CPU_NUM_THREADS * sizeof(bufferElement_na));
+    
+    // ========================================================================
+    
     // Check if multi-writer mode
     if (pattern->multi_writer) {
         std::cout << "[INFO] Multi-writer mode detected - allocating scope-specific buffers" << std::endl;
@@ -236,14 +418,34 @@ int main(int argc, char* argv[]) {
             cudaMemset(buffer_s, 0, BUFFER_SIZE * sizeof(bufferElement_s));
         }
         
+        std::cout << "[INFO] Launching CPU threads for multi-writer mode..." << std::endl;
+        std::vector<std::thread> cpu_threads;
+        for (int i = 0; i < CPU_NUM_THREADS; i++) {
+            cpu_threads.push_back(std::thread(dispatch_cpu_thread_multi, i,
+                buffer_t, buffer_b, buffer_d, buffer_s, dummy_buffer, result_c,
+                r_signal, w_t_signal, w_b_signal, w_d_signal, w_s_signal,
+                w_fb_signal, timing_c));
+            
+            // Set CPU affinity
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(i, &cpuset);
+            pthread_setaffinity_np(cpu_threads[i].native_handle(), sizeof(cpu_set_t), &cpuset);
+        }
+        
         std::cout << "[INFO] Launching pattern_orchestrator_multi kernel..." << std::endl;
         
         pattern_orchestrator_multi<<<GPU_NUM_BLOCKS, GPU_NUM_THREADS>>>(
             buffer_t, buffer_b, buffer_d, buffer_s,
             dummy_buffer, result_g,
             r_signal, w_t_signal, w_b_signal, w_d_signal, w_s_signal,
-            w_fb_signal
+            w_fb_signal, timing_g
         );
+        
+        // Wait for CPU threads to complete
+        for (int i = 0; i < CPU_NUM_THREADS; i++) {
+            cpu_threads[i].join();
+        }
         
         // Cleanup multi-writer buffers
         if (allocator == CE_SYS_MALLOC || allocator == CE_NUMA_HOST || allocator == CE_NUMA_DEVICE) {
@@ -263,14 +465,34 @@ int main(int argc, char* argv[]) {
             cudaFree(buffer_s);
         }
     } else {
+        std::cout << "[INFO] Launching CPU threads for single-writer mode..." << std::endl;
+        std::vector<std::thread> cpu_threads;
+        for (int i = 0; i < CPU_NUM_THREADS; i++) {
+            cpu_threads.push_back(std::thread(dispatch_cpu_thread, i,
+                buffer, dummy_buffer, result_c,
+                r_signal, w_t_signal, w_b_signal, w_d_signal, w_s_signal,
+                w_fb_signal, timing_c));
+            
+            // Set CPU affinity
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(i, &cpuset);
+            pthread_setaffinity_np(cpu_threads[i].native_handle(), sizeof(cpu_set_t), &cpuset);
+        }
+        
         std::cout << "[INFO] Launching pattern_orchestrator kernel..." << std::endl;
         
         // Launch pattern orchestrator
         pattern_orchestrator<<<GPU_NUM_BLOCKS, GPU_NUM_THREADS>>>(
             buffer, dummy_buffer, result_g,
             r_signal, w_t_signal, w_b_signal, w_d_signal, w_s_signal,
-            w_fb_signal
+            w_fb_signal, timing_g
         );
+        
+        // Wait for CPU threads to complete
+        for (int i = 0; i < CPU_NUM_THREADS; i++) {
+            cpu_threads[i].join();
+        }
     }
     
     cudaError_t err = cudaDeviceSynchronize();
@@ -281,9 +503,24 @@ int main(int argc, char* argv[]) {
     
     std::cout << "[INFO] Kernel execution completed" << std::endl;
     
+    // ========================================================================
+    // TIMING INSTRUMENTATION: Copy and write timing data
+    // ========================================================================
+    
+    std::cout << "[INFO] Copying timing data from device..." << std::endl;
+    gpu_timing_data *timing_h = (gpu_timing_data *) malloc(GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(gpu_timing_data));
+    cudaMemcpy(timing_h, timing_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(gpu_timing_data), cudaMemcpyDeviceToHost);
+    
     // Copy results back
     bufferElement_na *result_h = (bufferElement_na *) malloc(GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na));
     cudaMemcpy(result_h, result_g, GPU_NUM_BLOCKS * GPU_NUM_THREADS * sizeof(bufferElement_na), cudaMemcpyDeviceToHost);
+    
+    // Write timing CSV (includes both GPU and CPU)
+    write_timing_csv(pattern->name, timing_h, GPU_NUM_BLOCKS * GPU_NUM_THREADS, 
+                     timing_c, CPU_NUM_THREADS, clock_overhead_avg,
+                     result_h, result_c);
+    
+    // ========================================================================
     
     // Print results
     std::cout << "\n=== Results ===" << std::endl;
@@ -306,9 +543,25 @@ int main(int argc, char* argv[]) {
         }
     }
     
+    // Print CPU results
+    std::cout << "\n=== CPU Results ===" << std::endl;
+    for (int i = 0; i < CPU_NUM_THREADS; i++) {
+        ThreadConfig cfg = pattern->cpu_threads[i];
+        if (cfg.role != ThreadRole::INACTIVE) {
+            std::cout << "C[" << i << "] " 
+                      << role_to_string(cfg.role) << " "
+                      << ordering_to_string(cfg.ordering)
+                      << " Result: " << result_c[i].data << std::endl;
+        }
+    }
+    
     // Cleanup
     free(result_h);
+    free(result_c);
+    free(timing_h);
+    free(timing_c);
     cudaFree(result_g);
+    cudaFree(timing_g);
     
     if (allocator == CE_SYS_MALLOC) {
         free(r_signal);

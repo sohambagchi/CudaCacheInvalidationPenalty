@@ -106,6 +106,8 @@ static ThreadConfig parse_inline_config(const std::string& value) {
             cfg.scope = string_to_scope(val);
         } else if (key == "watch_flag") {
             cfg.watch_flag = string_to_scope(val);
+        } else if (key == "caching") {
+            cfg.caching = (val == "true" || val == "True" || val == "TRUE");
         }
     }
     
@@ -160,15 +162,21 @@ bool PatternRegistry::validate_pattern(const PatternConfig& pat) {
                 return false;
             }
         }
-    }
-
-    // 4. Verify Coverage
-    // Every scope required by a reader must be provided by at least one writer
-    for (const auto& scope : required_scopes) {
-        if (writer_count_per_scope[scope] == 0) {
-            std::cerr << "[ERROR] Pattern Invalid: Readers are waiting for scope " 
-                      << scope_to_string(scope) 
-                      << ", but no Writer is configured to signal that scope." << std::endl;
+        
+        // 4. Verify Coverage (multi-writer only)
+        // Every scope required by a reader must be provided by at least one writer
+        for (const auto& scope : required_scopes) {
+            if (writer_count_per_scope[scope] == 0) {
+                std::cerr << "[ERROR] Pattern Invalid: Readers are waiting for scope " 
+                          << scope_to_string(scope) 
+                          << ", but no Writer is configured to signal that scope." << std::endl;
+                return false;
+            }
+        }
+    } else {
+        // Single-writer mode: just need at least one writer (it sets all flags)
+        if (total_writers == 0) {
+            std::cerr << "[ERROR] Pattern Invalid: No writers found. At least one writer is required." << std::endl;
             return false;
         }
     }

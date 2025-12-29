@@ -5,6 +5,7 @@
 #include "types.hpp"
 #include <cuda/atomic>
 #include <sched.h>
+#include <chrono>
 
 // ============================================================================
 // CPU READER VARIANTS
@@ -14,20 +15,26 @@
  * @brief CPU buffer reader with ACQUIRE memory ordering
  */
 template <typename B, typename W, typename R>
-static void __attribute__((optimize("O0"))) cpu_buffer_reader_acquire(
+static void __attribute__((optimize("O0"))) cpu_buffer_reader_acquire_no_cache(
     B *buffer, bufferElement_na *results,
-    R *r_signal, W *w_signal, flag_s *fallback_signal
+    R *r_signal, W *w_signal, flag_s *fallback_signal,
+    cpu_timing_data *timing
 ) {
     int core_id = sched_getcpu();
+    int tid = core_id % CPU_NUM_THREADS;
     uint result = 0;
     
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-        result += buffer[i].data.load(cuda::memory_order_relaxed);
-    }
+    timing[tid].thread_id = tid;
+    timing[tid].consumer_type = 1;  // reader_acq
+    timing[tid].caching = false;
     
-    results[core_id % CPU_NUM_THREADS].data = result;
+    results[tid].data = result;
     r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
     result = 0;
+    
+    // Record start time
+    auto start = std::chrono::high_resolution_clock::now();
+    timing[tid].start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
     
     // ACQUIRE LOAD on flag
     while(w_signal->flag.load(cuda::memory_order_acquire) == 0 && 
@@ -35,32 +42,99 @@ static void __attribute__((optimize("O0"))) cpu_buffer_reader_acquire(
         // Wait
     }
     
+    // Record flag trigger time
+    auto flag_time = std::chrono::high_resolution_clock::now();
+    timing[tid].flag_trigger_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(flag_time.time_since_epoch()).count();
+    
     for (int i = 0; i < BUFFER_SIZE; i++) {
         result += buffer[i].data.load(cuda::memory_order_relaxed);
     }
     
-    results[core_id % CPU_NUM_THREADS].data = result;
-    printf("C[%d] ACQ Result %d\n", core_id, result);
+    results[tid].data = result;
+    
+    // Record end time
+    auto end = std::chrono::high_resolution_clock::now();
+    timing[tid].end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count();
+    
+    printf("C[%d] NC-ACQ Result %d\n", core_id, result);
+}
+
+/**
+ * @brief CPU buffer reader with ACQUIRE memory ordering
+ */
+template <typename B, typename W, typename R>
+static void __attribute__((optimize("O0"))) cpu_buffer_reader_acquire_caching(
+    B *buffer, bufferElement_na *results,
+    R *r_signal, W *w_signal, flag_s *fallback_signal,
+    cpu_timing_data *timing
+) {
+    int core_id = sched_getcpu();
+    int tid = core_id % CPU_NUM_THREADS;
+    uint result = 0;
+    
+    timing[tid].thread_id = tid;
+    timing[tid].consumer_type = 1;  // reader_acq
+    timing[tid].caching = true;
+    
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    results[tid].data = result;
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+    result = 0;
+    
+    // Record start time
+    auto start = std::chrono::high_resolution_clock::now();
+    timing[tid].start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
+    
+    // ACQUIRE LOAD on flag
+    while(w_signal->flag.load(cuda::memory_order_acquire) == 0 && 
+          fallback_signal->flag.load(cuda::memory_order_relaxed) < 3) {
+        // Wait
+    }
+    
+    // Record flag trigger time
+    auto flag_time = std::chrono::high_resolution_clock::now();
+    timing[tid].flag_trigger_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(flag_time.time_since_epoch()).count();
+    
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    results[tid].data = result;
+    
+    // Record end time
+    auto end = std::chrono::high_resolution_clock::now();
+    timing[tid].end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count();
+    
+    printf("C[%d] C-ACQ Result %d\n", core_id, result);
 }
 
 /**
  * @brief CPU buffer reader with RELAXED memory ordering
  */
 template <typename B, typename W, typename R>
-static void __attribute__((optimize("O0"))) cpu_buffer_reader_relaxed(
+static void __attribute__((optimize("O0"))) cpu_buffer_reader_relaxed_no_cache(
     B *buffer, bufferElement_na *results,
-    R *r_signal, W *w_signal, flag_s *fallback_signal
+    R *r_signal, W *w_signal, flag_s *fallback_signal,
+    cpu_timing_data *timing
 ) {
     int core_id = sched_getcpu();
+    int tid = core_id % CPU_NUM_THREADS;
     uint result = 0;
     
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-        result += buffer[i].data.load(cuda::memory_order_relaxed);
-    }
+    timing[tid].thread_id = tid;
+    timing[tid].consumer_type = 2;  // reader_rlx
+    timing[tid].caching = false;
     
-    results[core_id % CPU_NUM_THREADS].data = result;
+    results[tid].data = result;
     r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
     result = 0;
+    
+    // Record start time
+    auto start = std::chrono::high_resolution_clock::now();
+    timing[tid].start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
     
     // RELAXED LOAD on flag
     while(w_signal->flag.load(cuda::memory_order_relaxed) == 0 && 
@@ -68,12 +142,72 @@ static void __attribute__((optimize("O0"))) cpu_buffer_reader_relaxed(
         // Wait
     }
     
+    // Record flag trigger time
+    auto flag_time = std::chrono::high_resolution_clock::now();
+    timing[tid].flag_trigger_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(flag_time.time_since_epoch()).count();
+    
     for (int i = 0; i < BUFFER_SIZE; i++) {
         result += buffer[i].data.load(cuda::memory_order_relaxed);
     }
     
-    results[core_id % CPU_NUM_THREADS].data = result;
-    printf("C[%d] RLX Result %d\n", core_id, result);
+    results[tid].data = result;
+    
+    // Record end time
+    auto end = std::chrono::high_resolution_clock::now();
+    timing[tid].end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count();
+    
+    printf("C[%d] NC-RLX Result %d\n", core_id, result);
+}
+/**
+ * @brief CPU buffer reader with RELAXED memory ordering
+ */
+template <typename B, typename W, typename R>
+static void __attribute__((optimize("O0"))) cpu_buffer_reader_relaxed_caching(
+    B *buffer, bufferElement_na *results,
+    R *r_signal, W *w_signal, flag_s *fallback_signal,
+    cpu_timing_data *timing
+) {
+    int core_id = sched_getcpu();
+    int tid = core_id % CPU_NUM_THREADS;
+    uint result = 0;
+    
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+
+    timing[tid].thread_id = tid;
+    timing[tid].consumer_type = 2;  // reader_rlx
+    timing[tid].caching = true;
+    
+    results[tid].data = result;
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+    result = 0;
+    
+    // Record start time
+    auto start = std::chrono::high_resolution_clock::now();
+    timing[tid].start_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count();
+
+    // RELAXED LOAD on flag
+    while(w_signal->flag.load(cuda::memory_order_relaxed) == 0 && 
+          fallback_signal->flag.load(cuda::memory_order_relaxed) < 3) {
+        // Wait
+    }
+    
+    // Record flag trigger time
+    auto flag_time = std::chrono::high_resolution_clock::now();
+    timing[tid].flag_trigger_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(flag_time.time_since_epoch()).count();
+    
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        result += buffer[i].data.load(cuda::memory_order_relaxed);
+    }
+    
+    results[tid].data = result;
+    
+    // Record end time
+    auto end = std::chrono::high_resolution_clock::now();
+    timing[tid].end_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count();
+    
+    printf("C[%d] C-RLX Result %d\n", core_id, result);
 }
 
 // ============================================================================
@@ -91,7 +225,7 @@ static void __attribute__((optimize("O0"))) cpu_buffer_writer_release(
 ) {
     printf("CPU Writer (Release)\n");
     
-    while (r_signal->flag.load(cuda::memory_order_relaxed) != CPU_NUM_THREADS - 1) {}
+    while (r_signal->flag.load(cuda::memory_order_relaxed) != GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 1) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(10, cuda::memory_order_relaxed);
@@ -134,7 +268,7 @@ static void __attribute__((optimize("O0"))) cpu_buffer_writer_relaxed(
 ) {
     printf("CPU Writer (Relaxed)\n");
     
-    while (r_signal->flag.load(cuda::memory_order_relaxed) != CPU_NUM_THREADS - 1) {}
+    while (r_signal->flag.load(cuda::memory_order_relaxed) != GPU_NUM_BLOCKS * GPU_NUM_THREADS + CPU_NUM_THREADS - 1) {}
     
     for (int i = 0; i < BUFFER_SIZE; i++) {
         buffer[i].data.store(10, cuda::memory_order_relaxed);
@@ -164,6 +298,55 @@ static void __attribute__((optimize("O0"))) cpu_buffer_writer_relaxed(
     
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     fallback_signal->flag.store(4, cuda::memory_order_release);
+}
+
+// ============================================================================
+// CPU DUMMY FUNCTIONS FOR BACKGROUND LOAD
+// ============================================================================
+
+/**
+ * @brief Dummy CPU reader for background load
+ * Performs reads without synchronization to create memory traffic
+ */
+static void __attribute__((optimize("O0"))) cpu_dummy_reader_worker_propagation(
+    bufferElement *dummy_buffer,
+    bufferElement_na *results, 
+    flag_d *r_signal
+) {
+    int core_id = sched_getcpu();
+    int tid = core_id % CPU_NUM_THREADS;
+    uint result = 0;
+    
+    // Signal readiness
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+    
+    // Background read load
+    for (int iter = 0; iter < NUM_ITERATIONS; iter++) {
+        for (int i = 0; i < BUFFER_SIZE; i++) {
+            result += dummy_buffer[i].data.load(cuda::memory_order_relaxed);
+        }
+    }
+    
+    results[tid].data = result;
+}
+
+/**
+ * @brief Dummy CPU writer for background load
+ * Performs writes without synchronization to create memory traffic
+ */
+static void __attribute__((optimize("O0"))) cpu_dummy_writer_worker_propagation(
+    bufferElement *dummy_buffer, 
+    flag_d *r_signal
+) {
+    // Wait for readers to be ready (same logic as GPU)
+    r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+    
+    // Background write load
+    for (int iter = 0; iter < NUM_ITERATIONS; iter++) {
+        for (int i = 0; i < BUFFER_SIZE; i++) {
+            dummy_buffer[i].data.store(iter + i, cuda::memory_order_relaxed);
+        }
+    }
 }
 
 // ============================================================================
@@ -370,6 +553,19 @@ static void __attribute__((optimize("O0"))) cpu_buffer_multi_writer_system_relax
 extern const PatternConfig* g_active_pattern;
 
 /**
+ * @brief Helper to convert ThreadScope to uint8_t for timing data
+ */
+static inline uint8_t scope_to_uint8_cpu(ThreadScope scope) {
+    switch (scope) {
+        case ThreadScope::THREAD: return 0;
+        case ThreadScope::BLOCK: return 1;
+        case ThreadScope::DEVICE: return 2;
+        case ThreadScope::SYSTEM: return 3;
+        default: return 2;  // Default to device
+    }
+}
+
+/**
  * @brief Dispatch multi-writer to appropriate scope-specific variant
  */
 static void dispatch_multi_writer_cpu(
@@ -423,36 +619,74 @@ static void dispatch_multi_reader_cpu(
     flag_d *r_signal,
     flag_t *w_t_signal, flag_b *w_b_signal,
     flag_d *w_d_signal, flag_s *w_s_signal,
-    flag_s *fallback_signal
+    flag_s *fallback_signal,
+    cpu_timing_data *timing
 ) {
+    // Set flag type in timing data
+    int core_id = sched_getcpu();
+    int tid = core_id % CPU_NUM_THREADS;
+    timing[tid].flag_type = scope_to_uint8_cpu(cfg.watch_flag);
+    
     if (cfg.ordering == MemoryOrdering::ACQUIRE) {
         switch (cfg.watch_flag) {
             case ThreadScope::THREAD:
-                cpu_buffer_reader_acquire(buffer_t, results, r_signal, w_t_signal, fallback_signal);
+                if (cfg.caching) {
+                    cpu_buffer_reader_acquire_caching(buffer_t, results, r_signal, w_t_signal, fallback_signal, timing);
+                } else {
+                    cpu_buffer_reader_acquire_no_cache(buffer_t, results, r_signal, w_t_signal, fallback_signal, timing);
+                }
                 break;
             case ThreadScope::BLOCK:
-                cpu_buffer_reader_acquire(buffer_b, results, r_signal, w_b_signal, fallback_signal);
+                if (cfg.caching) {
+                    cpu_buffer_reader_acquire_caching(buffer_b, results, r_signal, w_b_signal, fallback_signal, timing);
+                } else {
+                    cpu_buffer_reader_acquire_no_cache(buffer_b, results, r_signal, w_b_signal, fallback_signal, timing);
+                }    
                 break;
             case ThreadScope::DEVICE:
-                cpu_buffer_reader_acquire(buffer_d, results, r_signal, w_d_signal, fallback_signal);
+                if (cfg.caching) {
+                    cpu_buffer_reader_acquire_caching(buffer_d, results, r_signal, w_d_signal, fallback_signal, timing);
+                } else {
+                    cpu_buffer_reader_acquire_no_cache(buffer_d, results, r_signal, w_d_signal, fallback_signal, timing);
+                }
                 break;
             case ThreadScope::SYSTEM:
-                cpu_buffer_reader_acquire(buffer_s, results, r_signal, w_s_signal, fallback_signal);
+                if (cfg.caching) {
+                    cpu_buffer_reader_acquire_caching(buffer_s, results, r_signal, w_s_signal, fallback_signal, timing);
+                } else {
+                    cpu_buffer_reader_acquire_no_cache(buffer_s, results, r_signal, w_s_signal, fallback_signal, timing);
+                }
                 break;
         }
     } else {  // RELAXED
         switch (cfg.watch_flag) {
             case ThreadScope::THREAD:
-                cpu_buffer_reader_relaxed(buffer_t, results, r_signal, w_t_signal, fallback_signal);
+                if (cfg.caching) {
+                    cpu_buffer_reader_relaxed_caching(buffer_t, results, r_signal, w_t_signal, fallback_signal, timing);
+                } else {
+                    cpu_buffer_reader_relaxed_no_cache(buffer_t, results, r_signal, w_t_signal, fallback_signal, timing);
+                }
                 break;
             case ThreadScope::BLOCK:
-                cpu_buffer_reader_relaxed(buffer_b, results, r_signal, w_b_signal, fallback_signal);
+                if (cfg.caching) {
+                    cpu_buffer_reader_relaxed_caching(buffer_b, results, r_signal, w_b_signal, fallback_signal, timing);
+                } else {
+                    cpu_buffer_reader_relaxed_no_cache(buffer_b, results, r_signal, w_b_signal, fallback_signal, timing);
+                }
                 break;
             case ThreadScope::DEVICE:
-                cpu_buffer_reader_relaxed(buffer_d, results, r_signal, w_d_signal, fallback_signal);
+                if (cfg.caching) {
+                    cpu_buffer_reader_relaxed_caching(buffer_d, results, r_signal, w_d_signal, fallback_signal, timing);
+                } else {
+                    cpu_buffer_reader_relaxed_no_cache(buffer_d, results, r_signal, w_d_signal, fallback_signal, timing);
+                }
                 break;
             case ThreadScope::SYSTEM:
-                cpu_buffer_reader_relaxed(buffer_s, results, r_signal, w_s_signal, fallback_signal);
+                if (cfg.caching) {
+                    cpu_buffer_reader_relaxed_caching(buffer_s, results, r_signal, w_s_signal, fallback_signal, timing);
+                } else {
+                    cpu_buffer_reader_relaxed_no_cache(buffer_s, results, r_signal, w_s_signal, fallback_signal, timing);
+                }
                 break;
         }
     }
@@ -464,15 +698,20 @@ static void dispatch_multi_reader_cpu(
 static void dispatch_cpu_thread(
     int tid,
     bufferElement *buffer,
+    bufferElement *dummy_buffer,
     bufferElement_na *results,
     flag_d *r_signal,
     flag_t *w_t_signal, flag_b *w_b_signal,
     flag_d *w_d_signal, flag_s *w_s_signal,
-    flag_s *fallback_signal
+    flag_s *fallback_signal,
+    cpu_timing_data *timing
 ) {
     if (!g_active_pattern) return;
     
     ThreadConfig cfg = g_active_pattern->cpu_threads[tid];
+    
+    // Set flag type for readers
+    timing[tid].flag_type = scope_to_uint8_cpu(cfg.watch_flag);
     
     if (cfg.role == ThreadRole::WRITER) {
         if (cfg.ordering == MemoryOrdering::RELEASE) {
@@ -489,44 +728,104 @@ static void dispatch_cpu_thread(
         if (cfg.ordering == MemoryOrdering::ACQUIRE) {
             switch (cfg.watch_flag) {
                 case ThreadScope::THREAD:
-                    cpu_buffer_reader_acquire(buffer, results, r_signal,
-                                            w_t_signal, fallback_signal);
+                    if (cfg.caching) {
+                        cpu_buffer_reader_acquire_caching(buffer, results, r_signal,
+                                                w_t_signal, fallback_signal, timing);
+                    } else {
+                        cpu_buffer_reader_acquire_no_cache(buffer, results, r_signal,
+                                                w_t_signal, fallback_signal, timing);
+                    }
                     break;
                 case ThreadScope::BLOCK:
-                    cpu_buffer_reader_acquire(buffer, results, r_signal,
-                                            w_b_signal, fallback_signal);
+                    if (cfg.caching) {
+                        cpu_buffer_reader_acquire_caching(buffer, results, r_signal,
+                                                w_b_signal, fallback_signal, timing);
+                    } else {
+                        cpu_buffer_reader_acquire_no_cache(buffer, results, r_signal,
+                                                w_b_signal, fallback_signal, timing);
+                    }
                     break;
                 case ThreadScope::DEVICE:
-                    cpu_buffer_reader_acquire(buffer, results, r_signal,
-                                            w_d_signal, fallback_signal);
+                    if (cfg.caching) {
+                        cpu_buffer_reader_acquire_caching(buffer, results, r_signal,
+                                                w_d_signal, fallback_signal, timing);
+                    } else {
+                        cpu_buffer_reader_acquire_no_cache(buffer, results, r_signal,
+                                                w_d_signal, fallback_signal, timing);
+                    }
                     break;
                 case ThreadScope::SYSTEM:
-                    cpu_buffer_reader_acquire(buffer, results, r_signal,
-                                            w_s_signal, fallback_signal);
+                    if (cfg.caching) {
+                        cpu_buffer_reader_acquire_caching(buffer, results, r_signal,
+                                                w_s_signal, fallback_signal, timing);
+                    } else {
+                        cpu_buffer_reader_acquire_no_cache(buffer, results, r_signal,
+                                                w_s_signal, fallback_signal, timing);
+                    }
                     break;
             }
         } else {  // RELAXED
             switch (cfg.watch_flag) {
                 case ThreadScope::THREAD:
-                    cpu_buffer_reader_relaxed(buffer, results, r_signal,
-                                            w_t_signal, fallback_signal);
+                    if (cfg.caching) {
+                        cpu_buffer_reader_relaxed_caching(buffer, results, r_signal,
+                                                w_t_signal, fallback_signal, timing);
+                    } else {
+                        cpu_buffer_reader_relaxed_no_cache(buffer, results, r_signal,
+                                                w_t_signal, fallback_signal, timing);
+                    }
                     break;
                 case ThreadScope::BLOCK:
-                    cpu_buffer_reader_relaxed(buffer, results, r_signal,
-                                            w_b_signal, fallback_signal);
+                    if (cfg.caching) {
+                        cpu_buffer_reader_relaxed_caching(buffer, results, r_signal,
+                                                w_b_signal, fallback_signal, timing);
+                    } else {
+                        cpu_buffer_reader_relaxed_no_cache(buffer, results, r_signal,
+                                                w_b_signal, fallback_signal, timing);
+                    }
                     break;
                 case ThreadScope::DEVICE:
-                    cpu_buffer_reader_relaxed(buffer, results, r_signal,
-                                            w_d_signal, fallback_signal);
+                    if (cfg.caching) {
+                        cpu_buffer_reader_relaxed_caching(buffer, results, r_signal,
+                                                w_d_signal, fallback_signal, timing);
+                    } else {
+                        cpu_buffer_reader_relaxed_no_cache(buffer, results, r_signal,
+                                                w_d_signal, fallback_signal, timing);
+                    }
                     break;
                 case ThreadScope::SYSTEM:
-                    cpu_buffer_reader_relaxed(buffer, results, r_signal,
-                                            w_s_signal, fallback_signal);
+                    if (cfg.caching) {
+                        cpu_buffer_reader_relaxed_caching(buffer, results, r_signal,
+                                                w_s_signal, fallback_signal, timing);
+                    } else {
+                        cpu_buffer_reader_relaxed_no_cache(buffer, results, r_signal,
+                                                w_s_signal, fallback_signal, timing);
+                    }
                     break;
             }
         }
+    } else if (cfg.role == ThreadRole::INACTIVE) {
+        // Mark as inactive
+        r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+        timing[tid].consumer_type = 0;
+        timing[tid].start_ns = 0;
+        timing[tid].flag_trigger_ns = 0;
+        timing[tid].end_ns = 0;
+    } else if (cfg.role == ThreadRole::DUMMY_READER) {
+        // Mark as dummy
+        timing[tid].consumer_type = 3;  // dummy
+        timing[tid].start_ns = 0;
+        timing[tid].flag_trigger_ns = 0;
+        timing[tid].end_ns = 0;
+        cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+    } else if (cfg.role == ThreadRole::DUMMY_WRITER) {
+        // Mark as dummy
+        timing[tid].consumer_type = 3;  // dummy
+        timing[tid].start_ns = 0;
+        timing[tid].flag_trigger_ns = 0;
+        timing[tid].end_ns = 0;
+        cpu_dummy_writer_worker_propagation(dummy_buffer, r_signal);
     }
-    // Note: DUMMY_READER and DUMMY_WRITER would need implementation if used on CPU
 }
 
 /**
@@ -536,11 +835,13 @@ static void dispatch_cpu_thread_multi(
     int tid,
     bufferElement_t *buffer_t, bufferElement_b *buffer_b,
     bufferElement_d *buffer_d, bufferElement_s *buffer_s,
+    bufferElement * dummy_buffer,
     bufferElement_na *results,
     flag_d *r_signal,
     flag_t *w_t_signal, flag_b *w_b_signal,
     flag_d *w_d_signal, flag_s *w_s_signal,
-    flag_s *fallback_signal
+    flag_s *fallback_signal,
+    cpu_timing_data *timing
 ) {
     if (!g_active_pattern) return;
     
@@ -555,9 +856,31 @@ static void dispatch_cpu_thread_multi(
         dispatch_multi_reader_cpu(cfg, buffer_t, buffer_b, buffer_d, buffer_s,
                                 results, r_signal,
                                 w_t_signal, w_b_signal, w_d_signal, w_s_signal,
-                                fallback_signal);
+                                fallback_signal, timing);
+    } else if (cfg.role == ThreadRole::INACTIVE) {
+        // Mark as inactive
+        r_signal->flag.fetch_add(1, cuda::memory_order_relaxed);
+        timing[tid].consumer_type = 0;
+        timing[tid].start_ns = 0;
+        timing[tid].flag_trigger_ns = 0;
+        timing[tid].end_ns = 0;
+    } else if (cfg.role == ThreadRole::DUMMY_READER) {
+        // Mark as dummy
+        timing[tid].consumer_type = 3;  // dummy
+        timing[tid].start_ns = 0;
+        timing[tid].flag_trigger_ns = 0;
+        timing[tid].end_ns = 0;
+        // Note: Using buffer_d for dummy operations in multi-writer mode
+        cpu_dummy_reader_worker_propagation(dummy_buffer, results, r_signal);
+    } else if (cfg.role == ThreadRole::DUMMY_WRITER) {
+        // Mark as dummy
+        timing[tid].consumer_type = 3;  // dummy
+        timing[tid].start_ns = 0;
+        timing[tid].flag_trigger_ns = 0;
+        timing[tid].end_ns = 0;
+        // Note: Using buffer_d for dummy operations in multi-writer mode
+        cpu_dummy_writer_worker_propagation(dummy_buffer, r_signal);
     }
-    // Note: DUMMY_READER and DUMMY_WRITER would need implementation if used on CPU
 }
 
 #endif // PATTERN_DISPATCH_CPU_H
