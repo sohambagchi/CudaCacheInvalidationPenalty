@@ -48,8 +48,10 @@ patterns:
     
     cpu:
       num_threads: 32
-      all_threads:
-        role: dummy_reader
+      threads: 
+        thread_0_7: {role: reader, ordering: acquire, scope: system, watch_flag: system}
+        threads_8_15: {role: reader, ordering: relaxed, scope: device, watch_flag: device}
+        threads_16_31: {role: dummy_reader}
 ```
 
 ### C++ Data Structures
@@ -127,6 +129,47 @@ public:
     void list_patterns() const;
 };
 
+bool PatternRegistry::validate_pattern(const PatternConfig& pat) {
+    std::set<ThreadScope> required_scopes;
+    std::set<ThreadScope> provided_scopes;
+
+    // 1. Scan GPU Threads
+    for (int b = 0; b < pat.gpu_num_blocks; b++) {
+        for (int t = 0; t < pat.gpu_threads_per_block; t++) {
+            const auto& cfg = pat.gpu_threads[b][t];
+            if (cfg.role == ThreadRole::READER) {
+                required_scopes.insert(cfg.watch_flag);
+            }
+            else if (cfg.role == ThreadRole::WRITER) {
+                provided_scopes.insert(cfg.scope);
+            }
+        }
+    }
+
+    // 2. Scan CPU Threads
+    for (int t = 0; t < pat.cpu_num_threads; t++) {
+        const auto& cfg = pat.cpu_threads[t];
+        if (cfg.role == ThreadRole::READER) {
+            required_scopes.insert(cfg.watch_flag);
+        }
+        else if (cfg.role == ThreadRole::WRITER) {
+            provided_scopes.insert(cfg.scope);
+        }
+    }
+
+    // 3. Verify Coverage
+    // Every scope required by a reader must be provided by at least one writer
+    for (const auto& scope : required_scopes) {
+        if (provided_scopes.find(scope) == provided_scopes.end()) {
+            std::cerr << "[ERROR] Pattern Invalid: Readers are waiting for scope " 
+                      << scope_to_string(scope) 
+                      << ", but no Writer is configured to signal that scope." << std::endl;
+            return false;
+        }
+    }
+
+    return true;
+}
 // Global instance
 extern PatternRegistry g_pattern_registry;
 
@@ -475,6 +518,50 @@ __device__ void dispatch_reader(
 }
 ```
 
+```cpp
+void dispatch_cpu_thread(
+    int tid,
+    bufferElement *buffer,
+    bufferElement_na *results,
+    flag_d *r_signal,
+    // CPU now needs access to ALL flag tiers to simulate hierarchy
+    flag_t *w_t_signal, flag_b *w_b_signal,
+    flag_d *w_d_signal, flag_s *w_s_signal,
+    flag_s *fallback_signal
+) {
+    ThreadConfig cfg = g_active_pattern->cpu_threads[tid];
+
+    // Helper: Select the target flag based on scope/watch_flag
+    auto get_flag_ptr = [&](ThreadScope s) -> void* {
+        switch (s) {
+            case ThreadScope::THREAD: return w_t_signal;
+            case ThreadScope::BLOCK:  return w_b_signal;
+            case ThreadScope::DEVICE: return w_d_signal;
+            case ThreadScope::SYSTEM: return w_s_signal;
+            default: return nullptr;
+        }
+    };
+
+    if (cfg.role == ThreadRole::WRITER) {
+        void* flag = get_flag_ptr(cfg.scope);
+        // Cast to appropriate type and call writer variant...
+        // Note: You might need a templated writer or switch-case casting here
+        // similar to the GPU dispatch_writer
+    }
+    else if (cfg.role == ThreadRole::READER) {
+        void* flag = get_flag_ptr(cfg.watch_flag);
+        
+        if (cfg.ordering == MemoryOrdering::ACQUIRE) {
+            // Dispatch to generic acquire reader, casting flag appropriately
+            // or use the switch block from the GPU implementation
+        } 
+        else {
+            // Dispatch relaxed
+        }
+    }
+}
+```
+
 ### Generic Orchestrator Kernel
 
 Add to `gpu_kernels.cuh`:
@@ -591,6 +678,8 @@ LIBS += -lyaml-cpp
 **Day 1-2: Data Structures**
 - [ ] Create `pattern_config.h` with enums and structs
 - [ ] Create `pattern_config.cpp` with YAML parser
+- [ ] Implement `validate_pattern()` logic in `pattern_config.cpp`.
+- [ ] Ensure `PatternRegistry::load_from_yaml` calls validation before returning success.
 - [ ] Test loading a simple pattern from YAML
 - [ ] Implement `PatternRegistry::list_patterns()`
 
@@ -610,6 +699,8 @@ LIBS += -lyaml-cpp
 - [ ] Implement `dispatch_reader()`
 - [ ] Implement `dispatch_writer()`
 - [ ] Create `pattern_orchestrator` kernel
+- [ ] Update `dispatch_cpu_thread` to accept all 4 flag pointers (`flag_t`, `flag_b`, `flag_d`, `flag_s`).
+- [ ] Update `main.cu` to pass all 4 flag pointers when launching CPU threads.
 
 **Day 3-5: Main Integration & Testing**
 - [ ] Add `-P` and `-F` flags to main.cu
@@ -743,7 +834,11 @@ patterns:
     
     cpu:
       num_threads: 32
-      all_threads: {role: dummy_reader}
+      threads: 
+        thread_0_7: {role: reader, ordering: acquire, scope: system, watch_flag: system}
+        threads_8_15: {role: reader, ordering: relaxed, scope: device, watch_flag: device}
+        threads_16_31: {role: dummy_reader}
+
 ```
 
 ### Pattern 2: Scope Hierarchy Comparison
@@ -781,7 +876,10 @@ patterns:
     
     cpu:
       num_threads: 32
-      all_threads: {role: dummy_reader}
+      threads: 
+        thread_0_7: {role: reader, ordering: acquire, scope: system, watch_flag: system}
+        threads_8_15: {role: reader, ordering: relaxed, scope: device, watch_flag: device}
+        threads_16_31: {role: dummy_reader}
 ```
 
 ### Pattern 3: Warp-Level Mixing
@@ -817,7 +915,10 @@ patterns:
     
     cpu:
       num_threads: 32
-      all_threads: {role: dummy_reader}
+      threads: 
+        thread_0_7: {role: reader, ordering: acquire, scope: system, watch_flag: system}
+        threads_8_15: {role: reader, ordering: relaxed, scope: device, watch_flag: device}
+        threads_16_31: {role: dummy_reader}
 ```
 
 ---
