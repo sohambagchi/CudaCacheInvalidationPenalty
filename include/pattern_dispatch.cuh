@@ -2,7 +2,7 @@
 #define PATTERN_DISPATCH_CUH
 
 #include "pattern_config.hpp"
-#include "types.h"
+#include "types.hpp"
 #include <cuda/atomic>
 
 // Device sleep function for synchronization delays

@@ -2,7 +2,7 @@
 #define PATTERN_DISPATCH_CPU_H
 
 #include "pattern_config.hpp"
-#include "types.h"
+#include "types.hpp"
 #include <cuda/atomic>
 #include <sched.h>
 
