@@ -11,16 +11,18 @@ This codebase tests cache invalidation penalties when data written by one proces
 ### Build
 
 ```bash
-make all              # Build all variants
-make flag-rel         # Build release-ordered flag variants only
-make flag-rlx         # Build relaxed-ordered flag variants only
+make all              # Build all variants (all ordering combinations)
+make acq-rel          # Build acquire-release variants only
+make acq-rlx          # Build acquire-relaxed variants only
+make rlx-rel          # Build relaxed-release variants only
+make rlx-rlx          # Build relaxed-relaxed variants only
 ```
 
 ### Run
 
 ```bash
 # Single executable with runtime flags
-./cache_invalidation_testing_rel_CUDA_THREAD_SCOPE_THREAD_DATA_SIZE_32_BUFFER_SAME.out \
+./output/cache_invalidation_testing_acq_rel_CUDA_THREAD_SCOPE_THREAD_DATA_SIZE_32.out \
     -m malloc \       # Memory allocator
     -r gpu \          # Reader type (gpu/cpu)
     -w cpu \          # Writer type (gpu/cpu)
@@ -64,16 +66,19 @@ The code tests how quickly updates propagate through CUDA's memory scope hierarc
 
 ## File Overview
 
-- `cache_invalidation_testing.cuh` - All function declarations and definitions (2178 lines)
+- `gpu_kernels.cuh` - GPU kernel implementations and device functions
+- `cpu_functions.h` - CPU thread implementations and host functions
+- `types.h` - Type definitions, buffer structures, and configuration flags
 - `cache_invalidation_testing.cu` - Main entry point and runtime logic
 - `Makefile` - Build system with compile-time flag matrix
 - `run_all.py` - Automated test runner
 - `check_distribution.py` - Result analysis utilities
 - `func_decl.py` - Code generation helper
+- `docs/REFERENCE.md` - Detailed technical reference documentation
 
 ## Documentation
 
-See [REFERENCE.md](REFERENCE.md) for detailed technical reference including:
+See [docs/REFERENCE.md](docs/REFERENCE.md) for detailed technical reference including:
 - All consumer function signatures
 - Data structure layouts
 - Synchronization mechanisms
@@ -81,12 +86,28 @@ See [REFERENCE.md](REFERENCE.md) for detailed technical reference including:
 
 ## Compile-Time Flags
 
-- `CUDA_THREAD_SCOPE_*` - Sets atomic scope
-- `DATA_SIZE_*` - Sets data element size (8/16/32/64-bit)
-- `P_H_FLAG_STORE_ORDER_REL` - Writer uses release store
-- `P_H_FLAG_STORE_ORDER_RLX` - Writer uses relaxed store
-- `NO_ACQ` - Disable acquire loads in readers
-- `CONSUMERS_CACHE` - Enable pre-caching in consumers
+### Atomic Scope
+- `CUDA_THREAD_SCOPE_THREAD` - Thread-level atomic scope
+- `CUDA_THREAD_SCOPE_BLOCK` - Block-level atomic scope
+- `CUDA_THREAD_SCOPE_DEVICE` - Device-level atomic scope
+- `CUDA_THREAD_SCOPE_SYSTEM` - System-level atomic scope
+
+### Data Size
+- `DATA_SIZE_8` - 8-bit data elements
+- `DATA_SIZE_16` - 16-bit data elements
+- `DATA_SIZE_32` - 32-bit data elements (default)
+- `DATA_SIZE_64` - 64-bit data elements
+
+### Memory Ordering (Producer/Writer)
+- `P_H_FLAG_STORE_ORDER_REL` - Writer uses `memory_order_release` for flag stores
+- `P_H_FLAG_STORE_ORDER_RLX` - Writer uses `memory_order_relaxed` for flag stores
+
+### Memory Ordering (Consumer/Reader)
+- `C_H_FLAG_LOAD_ORDER_ACQ` - Reader uses `memory_order_acquire` for flag loads
+- `C_H_FLAG_LOAD_ORDER_RLX` - Reader uses `memory_order_relaxed` for flag loads
+
+### Other Options
+- `CONSUMERS_CACHE` - Enable pre-caching in consumer functions
 
 ## Architecture Notes
 
