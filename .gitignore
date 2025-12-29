@@ -2,6 +2,6 @@
 *.S
 *.out
 *.ncu-rep
-outputs/
+output/
 ncu_reports/
 .venv/
