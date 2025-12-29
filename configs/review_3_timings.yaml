@@ -1,0 +1,67 @@
+patterns:
+  - name: reviewer_timing_validation_v2
+    description: "Timing validation with explicit caching controls to prove L2 residency"
+    multi_writer: false
+    
+    gpu:
+      num_blocks: 8
+      threads_per_block: 64
+      
+      blocks:
+        # ----------------------------------------------------------------
+        # WRITER: Device Scope
+        # ----------------------------------------------------------------
+        block_0:
+          thread_0: {role: writer, scope: device, ordering: release}
+          threads_1_63: {role: dummy_reader}
+        
+        # ----------------------------------------------------------------
+        # EXPERIMENT A: The "Correct" Synchronization
+        # Ordering: ACQUIRE
+        # Caching: TRUE (Default)
+        # Mechanism: Hardware enforces self-invalidation. 
+        # Expectation: L2 Latency (~200 cycles). Data is fresh.
+        # ----------------------------------------------------------------
+        block_1:
+          thread_0: {role: reader, ordering: acquire, watch_flag: device, caching: true}
+          threads_1_63: {role: dummy_reader}
+
+        # ----------------------------------------------------------------
+        # EXPERIMENT B: The "Stale L1" Baseline
+        # Ordering: RELAXED
+        # Caching: TRUE
+        # Mechanism: No invalidation signal received. 
+        # Expectation: L1 Latency (~30 cycles). Data is stale (pre-loaded).
+        # ----------------------------------------------------------------
+        block_2:
+          thread_0: {role: reader, ordering: relaxed, watch_flag: device, caching: true}
+          threads_1_63: {role: dummy_reader}
+        
+        # ----------------------------------------------------------------
+        # EXPERIMENT C: The "Forced L2" Control (CRITICAL FOR REVIEWER)
+        # Ordering: RELAXED
+        # Caching: FALSE (New Flag)
+        # Mechanism: Instruction-level L1 bypass (e.g., ld.cg).
+        # Expectation: L2 Latency (~200 cycles). 
+        # Logic: If Exp A == Exp C, then Exp A fetched from L2 (Write-Through).
+        #        If Exp C >> Exp A, then Exp A fetched from L1 (Magic?).
+        #        If Exp C >> 600 cycles, then data wasn't in L2 (Lazy Propagation).
+        # ----------------------------------------------------------------
+        block_3:
+          thread_0: {role: reader, ordering: relaxed, watch_flag: device, caching: false}
+          threads_1_63: {role: dummy_reader}
+          
+        block_4:
+          thread_0: {role: reader, ordering: acquire, watch_flag: thread, caching: true}
+          threads_1_63: {role: dummy_reader}
+
+        # ----------------------------------------------------------------
+        # BACKGROUND TRAFFIC
+        # ----------------------------------------------------------------
+        blocks_5_7:
+          all_threads: {role: dummy_reader}
+    
+    cpu:
+      num_threads: 32
+      threads:
+        all_threads: {role: inactive}

@@ -1,4 +1,4 @@
-OUTPUT = output/cache_invalidation_testing
+OUTPUT = bin/cache_invalidation_testing
 SRC = src/cache_invalidation_testing.cu
 PATTERN_SRC = src/pattern_config.cpp
 HEADERS = include/types.hpp include/pattern_config.hpp include/pattern_dispatch.cuh include/pattern_dispatch_cpu.hpp
@@ -10,18 +10,18 @@ SIZES = DATA_SIZE_32 DATA_SIZE_64 DATA_SIZE_16 DATA_SIZE_8
 
 all: $(foreach size,$(SIZES),$(OUTPUT)_$(size).out)
 
-output:
-	mkdir -p output
+bin:
+	mkdir -p bin
 
 define make_target
-$(OUTPUT)_$(1).out: $(SRC) $(PATTERN_SRC) $(HEADERS) | output
+$(OUTPUT)_$(1).out: $(SRC) $(PATTERN_SRC) $(HEADERS) | bin
 	$$(NVCC) $$(NVCC_FLAGS) $$(LIBS) -DPATTERN_DISPATCH -D$(1) -o $$@ $$(SRC) $$(PATTERN_SRC)
 endef
 
 $(foreach size,$(SIZES),$(eval $(call make_target,$(size))))
 
 clean:
-	rm -rf output
+	rm -rf bin
 	rm -f *.out *.ptx
 
 

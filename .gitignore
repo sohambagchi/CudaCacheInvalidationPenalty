@@ -3,5 +3,6 @@
 *.out
 *.ncu-rep
 output/
+bin/
 ncu_reports/
 .venv/

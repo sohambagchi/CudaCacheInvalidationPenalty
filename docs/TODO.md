@@ -55,6 +55,8 @@ The framework has consumer functions but **no timing instrumentation** to measur
 
 #### Phase 1: Timing Infrastructure
 
+**STATUS: ✅ COMPLETED** - Implemented 2025-12-29
+
 **Data Structures:**
 ```c
 // Per-thread GPU timing data
@@ -80,10 +82,15 @@ typedef struct cpu_timing_data {
 } cpu_timing_data;
 ```
 
-**Allocation:**
-- Allocate timing arrays in main()
-- Pass timing pointers to dispatch functions
-- Copy GPU timing data to host after synchronization
+✅ **Allocation:**
+- Timing arrays allocated in main()
+- Passed through orchestrator → dispatch → consumer chain
+- GPU: cudaMalloc, CPU: std::vector or malloc
+
+✅ **Calibration:**
+- Added `calibrate_clock_overhead()` kernel
+- Measures average clock64() overhead (10,000 samples)
+- Overhead correction applied in CSV output
 
 #### Phase 2: Instrument Consumer Functions
 
@@ -113,6 +120,12 @@ __device__ void gpu_buffer_reader_acquire(
 }
 ```
 
+**STATUS: ✅ COMPLETED** - GPU reader timing fully implemented as of 2025-12-29
+- gpu_buffer_reader_acquire and gpu_buffer_reader_relaxed instrumented
+- Records start_time, flag_trigger_time, end_time
+- Sets consumer_type and flag_type metadata
+- Integrated into dispatch chain: orchestrator → dispatch_gpu_thread → dispatch_reader → reader functions
+
 **GPU Writers:**
 ```cuda
 template <typename B, typename W, typename R>
@@ -135,30 +148,85 @@ __device__ void gpu_buffer_writer_release(
 }
 ```
 
+**STATUS: 📋 FUTURE WORK** - Writer timing deferred to Phase 5
+- Writers have complex multi-phase execution (thread/block/device/system scopes)
+- Need to decide whether to track all 4 flag stores or just final one
+- Lower priority than reader timing (readers are the critical measurement point)
+
 **CPU Functions:** Use `std::chrono::high_resolution_clock::now()`
+
+**STATUS: 📋 FUTURE WORK** - CPU timing deferred (Phase 6)
+- CPU threads not currently launched in pattern-based system
+- Will implement when CPU thread support is added
 
 #### Phase 3: Output and Analysis
 
+**STATUS: ✅ COMPLETED** - CSV output implemented 2025-12-29
+
 **Output Format (CSV):**
 ```csv
-device,block,thread,role,ordering,scope,watch_flag,start_ns,flag_ns,end_ns,result
-gpu,0,0,writer,release,device,,1234567890,1234567900,1234568000,512
-gpu,0,1,reader,acquire,device,device,1234567890,1234567905,1234568010,512
-gpu,0,2,reader,relaxed,device,device,1234567890,1234567920,1234568025,512
+device,block,thread,role,ordering,scope,watch_flag,start_cycles,flag_cycles,end_cycles,duration_cycles,wait_cycles,result_corrected
+gpu,0,0,writer,release,device,N/A,1234567890,1234567900,1234568000,110,110,107
+gpu,0,1,reader,acquire,device,device,1234567890,1234567905,1234568010,120,15,117
+gpu,0,2,reader,relaxed,device,device,1234567890,1234567920,1234568025,135,30,132
 ```
 
+✅ **Implementation:**
+- `write_timing_csv()` function in main.cu
+- Filename format: `timing_<pattern_name>_<timestamp>.csv`
+- Timestamp format: YYYYMMDD_HHMMSS
+- Overhead correction: duration_corrected = duration - (3 × clock_overhead)
+- Skips inactive/dummy threads
+
 **Analysis Tools:**
-- Add to `scripts/analyze_timing.py`
+- 📋 **TODO:** Add to `scripts/analyze_timing.py`
 - Calculate per-thread latencies
 - Compare acquire vs. relaxed propagation times
 - Visualize flag propagation across thread hierarchy
 
 #### Phase 4: Regression Testing
 
+**STATUS: 📋 FUTURE WORK**
+
 - Add timing baseline tests
 - Detect performance regressions
 - Compare across memory allocators
 - Track timing across different GPU architectures
+
+---
+
+## Phase 5: Writer Timing (Future Work)
+
+**Deferred from Phase 2** - Writers not timed in initial implementation
+
+### Challenges:
+1. **Multi-phase execution:** Writers execute 4 sequential phases (thread/block/device/system)
+2. **Timing granularity:** Should we track all 4 flag stores or just the final one?
+3. **Buffer variants:** Different buffer types per scope (bufferElement_t/b/d/s)
+4. **Lower priority:** Readers are the critical measurement point for propagation delays
+
+### When to implement:
+- After reader timing is validated and analyzed
+- If writer-side latency becomes research focus
+- When investigating write throughput vs. propagation tradeoffs
+
+---
+
+## Phase 6: CPU Thread Support (Future Work)
+
+**Deferred from Phase 2** - CPU threads not currently used in pattern-based system
+
+### Required changes:
+1. Add CPU thread launching in main()
+2. Instrument cpu_buffer_reader_acquire/relaxed with chrono
+3. Create cpu_timing_data allocation and collection
+4. Extend CSV output to include CPU timing
+5. Add CPU-GPU cross-device timing analysis
+
+### When to implement:
+- When heterogeneous CPU-GPU patterns are needed
+- For system-scope coherence testing
+- When comparing CPU vs GPU reader latencies
 
 ---
 
