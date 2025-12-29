@@ -1,5 +1,6 @@
 // #include "cache_invalidation_testing_propagation_hierarchy.cu"
-#include "cache_invalidation_testing.cuh"
+#include "gpu_kernels.cuh"
+#include "cpu_functions.h"
 
 int main(int argc, char* argv[]) {
 
@@ -130,17 +131,20 @@ int main(int argc, char* argv[]) {
     if (multi_producer)
         std::cout << "[INFO] Multi-Producer Mode" << std::endl;
 
-
-    #ifdef NO_ACQ
-        std::cout << "[INFO] No Acquire" << std::endl;
-    #endif
-
     #ifdef P_H_FLAG_STORE_ORDER_REL
         std::cout << "[INFO] Producers Release-Store to Flags" << std::endl;
     #endif
 
     #ifdef P_H_FLAG_STORE_ORDER_RLX
         std::cout << "[INFO] Producers Relaxed-Store to Flags" << std::endl;
+    #endif
+
+    #ifdef C_H_FLAG_LOAD_ORDER_ACQ
+        std::cout << "[INFO] Consumers Acquire-Load from Flags" << std::endl;
+    #endif
+
+    #ifdef C_H_FLAG_LOAD_ORDER_RLX
+        std::cout << "[INFO] Consumers Relaxed-Load from Flags" << std::endl;
     #endif
 
     
